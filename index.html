@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>问卷星 Demo 快速填充 · 一键安装</title>
+<style>
+  :root{
+    --bg:#0b1220; --card:#131c2e; --line:#243149; --text:#e8eef7;
+    --muted:#93a3bb; --accent:#2f80ed; --accent-hi:#4d97ff; --ok:#22c55e;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; padding:32px 16px 56px;
+    background:radial-gradient(1200px 600px at 50% -10%, #16233a 0%, var(--bg) 60%);
+    color:var(--text);
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    display:flex; justify-content:center;
+  }
+  .wrap{width:100%; max-width:720px}
+  header{text-align:center; margin-bottom:24px}
+  h1{margin:0 0 8px; font-size:26px; letter-spacing:.5px}
+  .sub{color:var(--muted); font-size:14px}
+  .badge{
+    display:inline-block; margin-top:12px; padding:4px 12px; border-radius:999px;
+    background:rgba(47,128,237,.14); border:1px solid rgba(47,128,237,.45);
+    color:var(--accent-hi); font-size:13px; font-weight:600;
+  }
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:24px; margin-bottom:16px; box-shadow:0 10px 30px rgba(0,0,0,.28);
+  }
+  .install{text-align:center}
+  .btn{
+    display:block; width:100%; padding:18px 20px; border:0; border-radius:12px;
+    background:linear-gradient(180deg,var(--accent-hi),var(--accent));
+    color:#fff; font-size:18px; font-weight:700; letter-spacing:1px;
+    text-decoration:none; cursor:pointer; transition:transform .08s ease, filter .15s ease;
+    box-shadow:0 8px 22px rgba(47,128,237,.35);
+  }
+  .btn:hover{filter:brightness(1.08)}
+  .btn:active{transform:scale(.985)}
+  .hint{margin-top:12px; color:var(--muted); font-size:13px}
+  .row{display:flex; gap:10px; margin-top:14px; flex-wrap:wrap}
+  .ghost{
+    flex:1; min-width:150px; text-align:center; padding:11px 14px; border-radius:10px;
+    background:#1b2740; border:1px solid var(--line); color:var(--text);
+    text-decoration:none; font-size:14px; cursor:pointer;
+  }
+  .ghost:hover{border-color:#3a4c6d; background:#20304d}
+  h2{margin:0 0 12px; font-size:16px; color:var(--text)}
+  ol,ul{margin:0; padding-left:20px; color:var(--muted)}
+  li{margin-bottom:7px}
+  li b, p b{color:var(--text); font-weight:600}
+  code{
+    background:#0f1728; border:1px solid var(--line); border-radius:6px;
+    padding:1px 6px; font-size:13px; color:#cbd8ea; word-break:break-all;
+  }
+  .link-box{
+    margin-top:10px; padding:10px 12px; background:#0f1728; border:1px solid var(--line);
+    border-radius:10px; font-size:12.5px; color:#9fb2cc; word-break:break-all;
+  }
+  .note{border-left:3px solid var(--ok); padding-left:14px; color:var(--muted); font-size:13.5px}
+  .toast{
+    position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(20px);
+    background:#1b2740; border:1px solid var(--line); color:var(--text);
+    padding:10px 18px; border-radius:10px; font-size:14px; opacity:0;
+    transition:opacity .2s ease, transform .2s ease; pointer-events:none;
+  }
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+  footer{text-align:center; color:#6b7c95; font-size:12.5px; margin-top:22px}
+  a{color:var(--accent-hi)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>问卷星 Demo 快速填充</h1>
+    <div class="sub">倒计时归零后 30ms 自动点击开始 · 按固定配置填写 · 仅用于自有或已授权问卷</div>
+    <div class="badge">当前版本 v0.25.0</div>
+  </header>
+
+  <div class="card install">
+    <a class="btn" id="installBtn"
+       href="https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.user.js">
+      一键安装到篡改猴
+    </a>
+    <div class="hint">点击后篡改猴会弹出安装确认页，点「安装」即可。需先装好篡改猴扩展。</div>
+    <div class="row">
+      <a class="ghost" href="https://www.tampermonkey.net/" target="_blank" rel="noopener">先装篡改猴扩展</a>
+      <button class="ghost" id="copyBtn" type="button">复制安装链接</button>
+      <a class="ghost" href="https://github.com/Guzifeng0613/Auto-fill" target="_blank" rel="noopener">查看源码仓库</a>
+    </div>
+    <div class="link-box" id="linkBox">https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.user.js</div>
+  </div>
+
+  <div class="card">
+    <h2>安装步骤</h2>
+    <ol>
+      <li>浏览器安装 <b>篡改猴（Tampermonkey）</b> 扩展并启用。</li>
+      <li>点上方 <b>一键安装到篡改猴</b>，在弹出页点 <b>安装</b>。</li>
+      <li>若之前装过旧版：先在篡改猴管理面板 <b>删除所有旧的同名条目</b>，只保留这一份。</li>
+      <li>打开问卷页，右下角出现面板即生效；面板标题应显示 <code>v0.25.0</code>。</li>
+      <li>首次使用点 <b>填写配置信息</b>，填好固定答案并 <b>保存固定答案</b>（仅存本机）。</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>功能说明</h2>
+    <ul>
+      <li><b>到点自动进入</b>：与页面倒计时同步，归零后约 30 毫秒点击开始按钮，点击被拒时每 250ms 重试。</li>
+      <li><b>按配置填写</b>：学号 / 姓名 / 性别 / 手机 / 学院 / 专业 / 班级 / 宿舍 / 身份证号，支持相似标签与简称选项模糊匹配。</li>
+      <li><b>缺项留空</b>：配置里没有的字段一律留空，绝不随机编造。</li>
+      <li><b>新字段保护</b>：出现无法对应的新字段时只勾选同意、不自动提交。</li>
+      <li><b>提交可选</b>：面板常驻「勾选同意并提交」开关，每页仅提交一次。</li>
+      <li><b>逐字段随机延时</b>：默认 30–300ms，可在配置区修改。</li>
+      <li><b>诊断日志</b>：配置区「复制诊断」可导出带时间戳的执行记录，便于排查。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>没有弹出安装页？</h2>
+    <ol>
+      <li>确认篡改猴已启用：扩展图标 → 管理面板 → 右上角开关为开启。</li>
+      <li>篡改猴设置 → 通用 → 配置模式改为 <b>初学者</b> 或 <b>高级</b>，并允许 <code>.user.js</code> 安装。</li>
+      <li>Chrome 需开启扩展的 <b>允许访问文件网址</b> 无关；若浏览器直接下载了文件，把下载到的 <code>.user.js</code> 拖进篡改猴管理面板即可。</li>
+      <li>也可复制上方链接，在篡改猴管理面板 → <b>实用工具</b> → <b>从 URL 安装</b> 粘贴安装。</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div class="note">
+      本脚本仅用于<b>自有或已获授权</b>的问卷星 demo 测试。不绕过安全校验、验证码、登录或风控；
+      遇到安全校验时会停下并提示人工完成。答案配置只保存在本机浏览器，不上传任何服务器。
+    </div>
+  </div>
+
+  <footer>MIT License · Guzifeng0613/Auto-fill</footer>
+</div>
+
+<div class="toast" id="toast">已复制安装链接</div>
+
+<script>
+(function () {
+  var url = document.getElementById('linkBox').textContent.trim();
+  var toast = document.getElementById('toast');
+  function show(msg) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(function () { toast.classList.remove('show'); }, 1800);
+  }
+  document.getElementById('copyBtn').addEventListener('click', function () {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () { show('已复制安装链接'); }, fallback);
+    } else { fallback(); }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); show('已复制安装链接'); }
+      catch (e) { show('复制失败，请手动选择链接'); }
+      ta.remove();
+    }
+  });
+})();
+</script>
+</body>
+</html>

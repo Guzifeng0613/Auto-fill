@@ -1,0 +1,1162 @@
+// ==UserScript==
+// @name         问卷星 Demo 快速填充
+// @namespace    https://local.demo/wjx-demo-fastfill
+// @version      0.25.0
+// @description  仅用于自有或已授权的问卷星 demo 测试：按本机保存的固定配置填写，配置没有的字段留空、不随机；遇到无法对应的新字段时只勾选同意不提交；倒计时与页面同步，归零后 30ms 自动点击开始；逐字段随机延时；不绕过安全校验、验证码、登录或风控。
+// @homepageURL  https://github.com/Guzifeng0613/Auto-fill
+// @supportURL   https://github.com/Guzifeng0613/Auto-fill/issues
+// @downloadURL  https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.user.js
+// @updateURL    https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.user.js
+// @match        *://*.wjx.cn/*
+// @match        *://*.wjx.top/*
+// @match        *://*.wjx.com/*
+// @match        *://*.sojump.com/*
+// @run-at       document-idle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @license      MIT
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const PANEL_ID = 'wjx-demo-fastfill-panel';
+  const VERSION = '0.25.0';
+  const CLICK_DELAY_MS = 30;
+
+  function cmpVersion(a, b) {
+    const pa = String(a).split('.').map(Number);
+    const pb = String(b).split('.').map(Number);
+    for (let i = 0; i < 3; i += 1) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d;
+    }
+    return 0;
+  }
+
+  if (window.__wjxDemoFastFillLoaded) {
+    const prev = window.__wjxDemoFastFillVersion || null;
+    if (prev && cmpVersion(prev, VERSION) >= 0) return;
+    try {
+      if (typeof window.__wjxDemoFastFillStop === 'function') window.__wjxDemoFastFillStop();
+    } catch (e) {}
+    const oldPanel = document.getElementById(PANEL_ID);
+    if (oldPanel) oldPanel.remove();
+    window.__wjxDemoFastFillDuplicate = (window.__wjxDemoFastFillDuplicate || 0) + 1;
+  }
+  window.__wjxDemoFastFillLoaded = true;
+  window.__wjxDemoFastFillVersion = VERSION;
+  const BLOCK_SELECTOR = '.divQuestion, .field, .question, .ui-field-contain, .form-group, tr, li';
+  const WAIT_KEY = 'wjxDemoAutoWait';
+  const RELOAD_KEY = 'wjxDemoReloadCount';
+  const ALLOW_SUBMIT_KEY = 'wjxDemoAllowSubmit';
+  const LAST_SUBMIT_KEY = 'wjxDemoLastSubmit';
+  const DELAY_KEY = 'wjxDemoDelayRange';
+  const FIXED_KEY = 'wjxDemoFixedAnswers';
+  const MAX_AUTO_RELOAD = 8;
+  const LOG_KEY = 'wjxDemoDebugLog';
+
+  const touchedText = new Map();
+  const touchedSelect = new Map();
+  const touchedOption = new Map();
+  const touchedCustom = new Map();
+  let submittedThisLoad = false;
+  let filledThisLoad = false;
+  let pageCountdownSeen = false;
+  let waitTimer = null;
+  let watchIvRef = null;
+  let startAttempts = 0;
+
+  window.__wjxDemoFastFillStop = () => {
+    if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+    if (watchIvRef) { clearInterval(watchIvRef); watchIvRef = null; }
+    const p = document.getElementById(PANEL_ID);
+    if (p) p.remove();
+  };
+
+  const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+  function readStore(key, def) {
+    try {
+      if (typeof GM_getValue === 'function') return GM_getValue(key, def);
+    } catch (e) {}
+    try {
+      const raw = localStorage.getItem(key);
+      return raw === null ? def : JSON.parse(raw);
+    } catch (e) {
+      return def;
+    }
+  }
+
+  function writeStore(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(key, value);
+        return;
+      }
+    } catch (e) {}
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  function delayRange() {
+    const r = readStore(DELAY_KEY, null) || {};
+    const rawMin = Number(r.min);
+    const rawMax = Number(r.max);
+    const min = Number.isFinite(rawMin) ? Math.max(0, rawMin) : 30;
+    const max = Number.isFinite(rawMax) ? Math.max(min, rawMax) : Math.max(min, 300);
+    return { min, max };
+  }
+
+  function humanDelay() {
+    const r = delayRange();
+    return sleep(randInt(r.min, r.max));
+  }
+
+  function allowSubmit() {
+    return readStore(ALLOW_SUBMIT_KEY, true) !== false;
+  }
+
+  function loadFixed() {
+    return readStore(FIXED_KEY, {}) || {};
+  }
+
+  function dlog(msg) {
+    try {
+      const arr = readStore(LOG_KEY, []) || [];
+      arr.push(new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' v' + VERSION + ' ' + msg);
+      while (arr.length > 40) arr.shift();
+      writeStore(LOG_KEY, arr);
+    } catch (e) {}
+  }
+
+  function saveFixed(obj) {
+    writeStore(FIXED_KEY, obj);
+  }
+
+  const FIXED_FIELDS = [
+    ['studentId', '学号'],
+    ['name', '姓名'],
+    ['gender', '性别'],
+    ['phone', '手机号'],
+    ['college', '学院'],
+    ['major', '专业'],
+    ['className', '班级'],
+    ['dorm', '宿舍号'],
+    ['dormRoom', '房间号'],
+    ['idCard', '身份证号']
+  ];
+
+  function hasFixedConfig() {
+    const fixed = loadFixed();
+    return FIXED_FIELDS.some(([key]) => fixed[key]);
+  }
+
+  function fixedKeyFor(hint) {
+    const h = String(hint || '').toLowerCase().replace(/[^一-龥a-z0-9]/g, '');
+    if (!h) return null;
+    if (/身份证|证件号|证件编号|idcard|idnumber|sfz|shenfenzheng/.test(h)) return 'idCard';
+    if (/学号|学籍号|学生号|学工号|学生证号|学生编号|studentid|studentno|studentnumber|stuid|stuno|sno|xh|xuehao/.test(h)
+      || /学(生|工|籍|证)[a-z0-9]*号/.test(h)) return 'studentId';
+    if (/姓名|名字|称呼|真实姓名|学生姓名|name|xm|xingming/.test(h)) return 'name';
+    if (/性别|gender|sex|xb|xingbie/.test(h)) return 'gender';
+    if (/房间|room|fj|fangjian/.test(h)) return 'dormRoom';
+    if (/宿舍|寝室|楼栋|公寓|dorm|ss|sushe/.test(h)) return 'dorm';
+    if (/学院|院系|系别|分院|所在系|学校|college|faculty|school|department|xy|xueyuan/.test(h)) return 'college';
+    if (/班级|班别|行政班|所在班|class|bj|banji/.test(h) || /班/.test(h)) return 'className';
+    if (/专业|major|zy|zhuanye/.test(h)) return 'major';
+    if (/手机|电话|联系方式|mobile|phone|tel|sj|dh|shouji/.test(h)) return 'phone';
+    return null;
+  }
+
+  function inPanel(el) {
+    return !!(el && el.closest && el.closest('#' + PANEL_ID));
+  }
+
+  function surveyRoot() {
+    return document.querySelector('#divQuestion')
+      || document.querySelector('.questionnaire')
+      || document.querySelector('.survey-content')
+      || document.querySelector('#form1')
+      || document.querySelector('form')
+      || document.body;
+  }
+
+  function isVisible(el) {
+    if (!el || inPanel(el)) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  }
+
+  function isEnabled(el) {
+    return !!el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+  }
+
+  function isEditableText(el) {
+    return isEnabled(el) && !el.readOnly && el.getAttribute('aria-readonly') !== 'true';
+  }
+
+  function fire(el, names) {
+    names.forEach((name) => {
+      el.dispatchEvent(new Event(name, { bubbles: true, cancelable: true }));
+    });
+  }
+
+  function setNativeValue(el, value) {
+    const proto = el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : el instanceof HTMLSelectElement
+        ? HTMLSelectElement.prototype
+        : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(el, value);
+    else el.value = value;
+    fire(el, ['input', 'change', 'blur']);
+  }
+
+  function questionBlock(el) {
+    return el.closest(BLOCK_SELECTOR) || el.parentElement || el;
+  }
+
+  function labelFor(el) {
+    if (!el.id) return null;
+    const esc = window.CSS && CSS.escape ? CSS.escape(el.id) : el.id.replace(/["\\]/g, '\\$&');
+    return document.querySelector('label[for="' + esc + '"]');
+  }
+
+  function hintFor(el) {
+    const block = questionBlock(el);
+    return clean([
+      labelFor(el) && labelFor(el).innerText,
+      block && block.innerText,
+      el.getAttribute('aria-label'),
+      el.getAttribute('placeholder'),
+      el.name,
+      el.id
+    ].filter(Boolean).join(' ')).slice(0, 160);
+  }
+
+  function optionLabel(input) {
+    const label = labelFor(input)
+      || input.closest('label')
+      || input.closest('.ui-radio, .ui-checkbox, [role="radio"], [role="checkbox"], .radio, .checkbox, .option');
+    return clean(label ? label.innerText : input.value || input.id || '选项');
+  }
+
+  function optionTarget(input) {
+    return labelFor(input)
+      || input.closest('label')
+      || input.closest('.ui-radio, .ui-checkbox, [role="radio"], [role="checkbox"], .radio, .checkbox, .option')
+      || input.parentElement
+      || input;
+  }
+
+  function snapshotOption(input) {
+    if (!touchedOption.has(input)) touchedOption.set(input, input.checked);
+  }
+
+  function setChecked(input, desired) {
+    snapshotOption(input);
+    if (input.checked === desired) return;
+    const target = optionTarget(input);
+    try { target.click(); } catch (e) { try { input.click(); } catch (e2) {} }
+    if (input.checked !== desired) {
+      input.checked = desired;
+      fire(input, ['input', 'change']);
+    }
+  }
+
+  function groupKey(input) {
+    if (input.name) return 'name:' + input.name;
+    const block = questionBlock(input);
+    return 'block:' + (block.id || block.getAttribute('data-id') || clean(block.innerText).slice(0, 60) || input.id);
+  }
+
+  function groupBy(inputs, keyFn) {
+    const map = new Map();
+    inputs.forEach((input) => {
+      const key = keyFn(input);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(input);
+    });
+    return map;
+  }
+
+  function choiceVisible(input) {
+    if (isVisible(input)) return true;
+    const target = optionTarget(input);
+    return !!target && target !== input && isVisible(target);
+  }
+
+  function isConsent(el) {
+    const idName = ((el.id || '') + ' ' + (el.name || '')).toLowerCase();
+    if (/checkxiexi|agree|consent/.test(idName)) return true;
+    const hint = hintFor(el).toLowerCase();
+    return /协议|隐私|条款|同意|checkxiexi/.test(hint);
+  }
+
+  const OPTION_ALIAS = [
+    ['计科', '计算机'],
+    ['信工', '信息工程'],
+    ['经管', '经济管理'],
+    ['外语', '英语'],
+    ['机械', '机械工程'],
+    ['艺术', '艺术设计']
+  ];
+
+  function normOption(s) {
+    let t = clean(s).toLowerCase().replace(/[^一-龥a-z0-9]/g, '');
+    t = t.replace(/(学院|学系|系|专业|班级|班|方向|性别)$/g, '');
+    OPTION_ALIAS.forEach(([from, to]) => { if (!t.includes(to)) t = t.split(from).join(to); });
+    return t;
+  }
+
+  function matchOption(label, want) {
+    const a = normOption(label);
+    const b = normOption(want);
+    if (!a || !b) return false;
+    if (a.includes(b) || b.includes(a)) return true;
+    const pa = a.match(/^([^\d]*)(\d*)$/);
+    const pb = b.match(/^([^\d]*)(\d*)$/);
+    if (pa && pb && pa[2] && pb[2] && pa[2] === pb[2]) {
+      const ca = pa[1];
+      const cb = pb[1];
+      if (ca && cb && (ca.includes(cb) || cb.includes(ca))) return true;
+    }
+    return false;
+  }
+
+  async function fillNativeChoices(root, fixed) {
+    let filled = 0;
+    let unmapped = 0;
+
+    const radios = Array.from(root.querySelectorAll('input[type="radio"]'))
+      .filter((el) => !inPanel(el) && isEnabled(el) && choiceVisible(el) && !isConsent(el));
+    for (const inputs of groupBy(radios, groupKey).values()) {
+      const enabled = inputs.filter(isEnabled);
+      if (!enabled.length) continue;
+      const key = fixedKeyFor(hintFor(enabled[0]));
+      const want = key ? fixed[key] : '';
+      if (!want) { if (!key) unmapped += 1; continue; }
+      await humanDelay();
+      enabled.forEach(snapshotOption);
+      const pick = enabled.find((input) => matchOption(optionLabel(input), want));
+      if (!pick) { unmapped += 1; continue; }
+      setChecked(pick, true);
+      filled += 1;
+    }
+
+    const checkboxes = Array.from(root.querySelectorAll('input[type="checkbox"]'))
+      .filter((el) => !inPanel(el) && isEnabled(el) && choiceVisible(el) && !isConsent(el));
+    for (const inputs of groupBy(checkboxes, groupKey).values()) {
+      const enabled = inputs.filter(isEnabled);
+      if (!enabled.length) continue;
+      unmapped += 1;
+    }
+
+    return { filled, unmapped };
+  }
+
+  async function fillCustomChoices(root, fixed) {
+    let filled = 0;
+    let unmapped = 0;
+    const selector = '[role="radio"], [role="checkbox"], .ui-radio, .ui-checkbox, .radio, .checkbox';
+    const elements = Array.from(root.querySelectorAll(selector)).filter((el) => {
+      if (inPanel(el) || !isVisible(el) || isConsent(el)) return false;
+      if (el.querySelector('input[type="radio"], input[type="checkbox"]')) return false;
+      return true;
+    });
+
+    const groups = groupBy(elements, (el) => {
+      const role = el.getAttribute('role') || (/checkbox/.test(el.className) ? 'checkbox' : 'radio');
+      const block = questionBlock(el);
+      return role + '|' + (block.id || block.getAttribute('data-id') || clean(block.innerText).slice(0, 60));
+    });
+
+    for (const [key, items] of groups) {
+      const role = key.split('|')[0];
+      const enabled = items.filter((el) => el.getAttribute('aria-disabled') !== 'true');
+      if (!enabled.length) continue;
+      if (role === 'checkbox') { unmapped += 1; continue; }
+      const fieldKey = fixedKeyFor(clean(questionBlock(enabled[0]).innerText));
+      const want = fieldKey ? fixed[fieldKey] : '';
+      if (!want) { if (!fieldKey) unmapped += 1; continue; }
+      await humanDelay();
+      const pick = enabled.find((el) => matchOption(clean(el.innerText), want));
+      if (!pick) { unmapped += 1; continue; }
+      if (!touchedCustom.has(pick)) touchedCustom.set(pick, pick.getAttribute('aria-checked'));
+      pick.dataset.wjxFfCustom = '1';
+      try { pick.click(); } catch (e) {}
+      if (pick.getAttribute('aria-checked') !== 'true') {
+        pick.setAttribute('aria-checked', 'true');
+        fire(pick, ['input', 'change', 'click']);
+      }
+      filled += 1;
+    }
+
+    return { filled, unmapped };
+  }
+
+  async function fillSelects(root, fixed) {
+    let filled = 0;
+    let unmapped = 0;
+    for (const select of root.querySelectorAll('select')) {
+      if (inPanel(select) || !isVisible(select) || !isEnabled(select) || select.multiple) continue;
+      const options = Array.from(select.options).filter((opt) => !opt.disabled && opt.value !== '');
+      if (!options.length) continue;
+      const key = fixedKeyFor(hintFor(select));
+      const want = key ? fixed[key] : '';
+      if (!want) { if (!key) unmapped += 1; continue; }
+      await humanDelay();
+      const chosen = options.find((opt) => matchOption(clean(opt.innerText || opt.textContent || opt.value), want));
+      if (!chosen) { unmapped += 1; continue; }
+      if (!touchedSelect.has(select)) touchedSelect.set(select, select.value);
+      setNativeValue(select, chosen.value);
+      filled += 1;
+    }
+    return { filled, unmapped };
+  }
+
+  async function fillTexts(root, fixed, status) {
+    let filled = 0;
+    let unmapped = 0;
+    const selector = [
+      'input[type="text"]',
+      'input[type="tel"]',
+      'input[type="email"]',
+      'input[type="number"]',
+      'input[type="date"]',
+      'input[type="datetime-local"]',
+      'input[type="url"]',
+      'input:not([type])',
+      'textarea'
+    ].join(',');
+
+    for (const el of root.querySelectorAll(selector)) {
+      if (inPanel(el) || !isVisible(el) || !isEditableText(el)) continue;
+      if (/^__/.test(el.name || '') || el.autocomplete === 'off' && el.name === 'search') continue;
+      const key = fixedKeyFor(hintFor(el));
+      const want = key ? fixed[key] : '';
+      if (!want) { if (!key) unmapped += 1; continue; }
+      await humanDelay();
+      let value = String(want);
+      const maxLength = Number(el.getAttribute('maxlength') || 0);
+      if (maxLength > 0) value = value.slice(0, maxLength);
+      if (!touchedText.has(el)) touchedText.set(el, el.value);
+      setNativeValue(el, value);
+      filled += 1;
+      if (status) status.textContent = '填写文本 ' + filled + '…';
+    }
+    return { filled, unmapped };
+  }
+
+  function collectAnswers() {
+    const root = surveyRoot();
+    const answers = [];
+
+    groupBy(Array.from(root.querySelectorAll('input[type="radio"]')).filter((el) => !inPanel(el)), groupKey)
+      .forEach((inputs) => {
+        const checked = inputs.find((el) => el.checked);
+        if (checked) answers.push({ type: 'radio', question: hintFor(checked), answer: optionLabel(checked) });
+      });
+
+    groupBy(Array.from(root.querySelectorAll('input[type="checkbox"]')).filter((el) => !inPanel(el)), groupKey)
+      .forEach((inputs) => {
+        const checked = inputs.filter((el) => el.checked);
+        if (checked.length) answers.push({ type: 'checkbox', question: hintFor(checked[0]), answer: checked.map(optionLabel) });
+      });
+
+    Array.from(root.querySelectorAll('[role="radio"][aria-checked="true"], [role="checkbox"][aria-checked="true"]'))
+      .filter((el) => !inPanel(el) && isVisible(el))
+      .forEach((el) => answers.push({ type: 'custom-choice', question: hintFor(el), answer: clean(el.innerText) }));
+
+    Array.from(root.querySelectorAll('select')).forEach((select) => {
+      if (inPanel(select) || !isVisible(select)) return;
+      const selected = Array.from(select.selectedOptions).map((opt) => clean(opt.innerText || opt.value));
+      if (selected.length) answers.push({ type: 'select', question: hintFor(select), answer: selected });
+    });
+
+    Array.from(root.querySelectorAll('input[type="text"], input[type="tel"], input[type="email"], input[type="number"], input[type="date"], input[type="datetime-local"], input[type="url"], input:not([type]), textarea'))
+      .forEach((el) => {
+        if (inPanel(el) || !isVisible(el) || !isEditableText(el)) return;
+        answers.push({ type: 'text', question: hintFor(el), answer: el.value });
+      });
+
+    return answers;
+  }
+
+  function findConsent() {
+    const known = document.getElementById('checkxiexi');
+    if (known) return known;
+    return Array.from(document.querySelectorAll('input[type="checkbox"]'))
+      .find((el) => !inPanel(el) && isConsent(el) && choiceVisible(el)) || null;
+  }
+
+  function clickConsent() {
+    const cb = findConsent();
+    if (!cb) return false;
+    if (cb.checked) return true;
+    const target = labelFor(cb) || cb.closest('label') || cb;
+    try { target.click(); } catch (e) { try { cb.click(); } catch (e2) {} }
+    if (!cb.checked) {
+      cb.checked = true;
+      fire(cb, ['input', 'change', 'click']);
+    }
+    return cb.checked;
+  }
+
+  function findSubmit() {
+    const preferred = ['#ctlNext', '#submit_button', '.submitbtn'];
+    for (const sel of preferred) {
+      const el = document.querySelector(sel);
+      if (el && !inPanel(el) && isVisible(el)) return el;
+    }
+    return Array.from(document.querySelectorAll('a, button, div, span'))
+      .find((el) => !inPanel(el) && isVisible(el) && (el.innerText || '').trim() === '提交') || null;
+  }
+
+  function submitNow(status) {
+    if (submittedThisLoad) {
+      status.textContent = '本次已提交过。';
+      return false;
+    }
+    const btn = findSubmit();
+    if (!btn) {
+      status.textContent = '未找到提交按钮。';
+      return false;
+    }
+    submittedThisLoad = true;
+    writeStore(LAST_SUBMIT_KEY, { url: location.href, at: Date.now() });
+    status.textContent = '已勾选并提交。';
+    try { btn.click(); } catch (e) {}
+    setTimeout(() => {
+      if (!document.contains(status)) return;
+      const text = pageText();
+      if (/安全校验|请重新提交|验证码|滑块|人机/.test(text)) {
+        status.textContent = '触发安全校验，请人工完成。';
+        return;
+      }
+      const err = Array.from(document.querySelectorAll('.field-error, .ui-li-tip, .error, .tip-error'))
+        .map((el) => el.innerText || '').filter(Boolean).join(' ');
+      if (err) status.textContent = '页面提示：' + err.slice(0, 80);
+    }, 800);
+    return true;
+  }
+
+  async function fillAll(status) {
+    filledThisLoad = true;
+    const root = surveyRoot();
+    const fixed = loadFixed();
+    status.textContent = '填写选项…';
+    const choices = await fillNativeChoices(root, fixed);
+    status.textContent = '填写自定义选项…';
+    const custom = await fillCustomChoices(root, fixed);
+    status.textContent = '填写下拉…';
+    const selects = await fillSelects(root, fixed);
+    const texts = await fillTexts(root, fixed, status);
+    const filled = choices.filled + custom.filled + selects.filled + texts.filled;
+    const unmapped = choices.unmapped + custom.unmapped + selects.unmapped + texts.unmapped;
+    dlog('fill done filled=' + filled + ' unmapped=' + unmapped);
+    status.textContent = '完成：填写' + filled + ' 项' + (unmapped ? '，未对应' + unmapped + ' 项' : '');
+    if (!allowSubmit()) return;
+    if (!clickConsent()) {
+      status.textContent = '未找到同意框。';
+      return;
+    }
+    if (unmapped > 0) {
+      status.textContent = '有未对应字段，已勾选不提交。';
+      return;
+    }
+    status.textContent = '提交前随机延时…';
+    await humanDelay();
+    submitNow(status);
+  }
+
+  function clearAll(status) {
+    touchedText.forEach((original, el) => {
+      if (document.contains(el)) setNativeValue(el, original);
+    });
+    touchedSelect.forEach((original, el) => {
+      if (document.contains(el)) setNativeValue(el, original);
+    });
+    touchedOption.forEach((original, el) => {
+      if (document.contains(el)) setChecked(el, original);
+    });
+    touchedCustom.forEach((original, el) => {
+      if (!document.contains(el)) return;
+      const current = el.getAttribute('aria-checked');
+      if (current !== original) {
+        try { el.click(); } catch (e) {}
+        if (original === null) el.removeAttribute('aria-checked');
+        else el.setAttribute('aria-checked', original);
+        fire(el, ['input', 'change']);
+      }
+      delete el.dataset.wjxFfCustom;
+    });
+    touchedText.clear();
+    touchedSelect.clear();
+    touchedOption.clear();
+    touchedCustom.clear();
+    status.textContent = '已恢复本次修改。';
+  }
+
+  async function copyResult(status) {
+    const text = JSON.stringify(collectAnswers(), null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      status.textContent = '已复制答案 JSON。';
+    } catch (e) {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.left = '-9999px';
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+      status.textContent = '已复制答案 JSON。';
+    }
+  }
+
+  function pageText() {
+    const panel = document.getElementById(PANEL_ID);
+    const parts = [];
+    Array.from(document.body.childNodes).forEach((n) => {
+      if (panel && (n === panel || (n.contains && n.contains(panel)))) return;
+      parts.push(n.innerText || n.textContent || '');
+    });
+    return parts.join(' ').replace(/\s+/g, ' ');
+  }
+
+  function parseOpenTarget() {
+    const text = pageText();
+    if (!/距离开始还有|将于.*开放|尚未开始|未开始/.test(text)) return null;
+    const c = text.match(/(\d+)\s*天\s*(\d+)\s*时\s*(\d+)\s*分\s*(\d+)\s*秒/);
+    const m = text.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    const target = m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime() : null;
+    if (c) return target !== null ? target : Date.now() + ((+c[1] * 86400 + +c[2] * 3600 + +c[3] * 60 + +c[4]) * 1000);
+    if (target !== null && target > Date.now()) return target;
+    return null;
+  }
+
+  function stillClosed() {
+    const live = liveCountdown();
+    if (pageCountdownSeen) return !!(live && live.ms > 0);
+    const t = parseOpenTarget();
+    return t !== null && t > Date.now();
+  }
+
+  const CD_FAST_SELECTOR = '#divStartTimeTip, #divTip, [id*="StartTime"], [id*="countdown"], [class*="countdown"]';
+
+  function liveCountdown() {
+    let text = null;
+    const fast = document.querySelectorAll(CD_FAST_SELECTOR);
+    for (const node of fast) {
+      if (inPanel(node)) continue;
+      const t = node.textContent || '';
+      if (/\d+\s*天\s*\d+\s*时\s*\d+\s*分\s*\d+\s*秒/.test(t)) { text = t; break; }
+    }
+    if (text === null) text = pageText();
+    const c = text.match(/(\d+)\s*天\s*(\d+)\s*时\s*(\d+)\s*分\s*(\d+)\s*秒/);
+    if (!c) return null;
+    pageCountdownSeen = true;
+    return {
+      ms: (+c[1] * 86400 + +c[2] * 3600 + +c[3] * 60 + +c[4]) * 1000,
+      label: c[1] + '天' + c[2] + '时' + c[3] + '分' + c[4] + '秒'
+    };
+  }
+
+  function fmtRemain(ms) {
+    const total = Math.max(0, Math.ceil(ms / 1000));
+    const d = Math.floor(total / 86400);
+    const h = Math.floor((total % 86400) / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    return (d > 0 ? d + '天' : '') + h + '时' + m + '分' + s + '秒';
+  }
+
+  function startTextOf(el) {
+    return clean(el.innerText || el.textContent || el.value || el.getAttribute('value') || '');
+  }
+
+  function depthOf(el) {
+    let d = 0;
+    let p = el;
+    while (p && p.parentElement) { d += 1; p = p.parentElement; }
+    return d;
+  }
+
+  function deepest(list) {
+    let best = null;
+    let bd = -1;
+    list.forEach((el) => {
+      const d = depthOf(el);
+      if (d > bd) { bd = d; best = el; }
+    });
+    return best;
+  }
+
+  function findStartButton() {
+    const nodes = Array.from(document.querySelectorAll(
+      'a, button, div, span, input[type="button"], input[type="submit"], [role="button"]'
+    )).filter((el) => !inPanel(el));
+    const exact = ['立即开始', '开始作答', '开始填答', '立即填写', '进入问卷', '开始答题', '立即进入', '开始', '进入'];
+    for (const want of exact) {
+      const hits = nodes.filter((el) => startTextOf(el) === want && (isVisible(el) || el.offsetWidth > 0 || el.offsetHeight > 0));
+      if (hits.length) return deepest(hits);
+    }
+    return deepest(nodes.filter((el) => {
+      const t = startTextOf(el);
+      if (!t || t.length > 10) return false;
+      if (!/开始|进入|填写/.test(t)) return false;
+      if (/停止|取消|返回|关闭|隐私|协议/.test(t)) return false;
+      return isVisible(el) || el.offsetWidth > 0 || el.offsetHeight > 0;
+    })) || null;
+  }
+
+  function firstSurveyField() {
+    return Array.from(document.querySelectorAll(
+      'input[type="text"], input[type="tel"], input[type="number"], textarea, select, input[type="radio"]'
+    )).find((el) => !inPanel(el) && isVisible(el)) || null;
+  }
+
+  function findStartNode() {
+    const visible = findStartButton();
+    if (visible) return visible;
+    const known = document.getElementById('cgstartbutton');
+    if (known && !inPanel(known)) return known;
+    const exact = ['立即开始', '开始作答', '开始填答', '立即填写', '进入问卷', '开始答题', '立即进入', '开始', '进入'];
+    return deepest(Array.from(document.querySelectorAll(
+      'a, button, input[type="button"], input[type="submit"], [role="button"]'
+    )).filter((el) => !inPanel(el) && exact.includes(startTextOf(el)))) || null;
+  }
+
+  function clickStart(el) {
+    try { el.click(); } catch (e) {}
+    setTimeout(() => {
+      if (firstSurveyField() || !stillClosed()) return;
+      try {
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      } catch (e) {}
+      try {
+        if (window.jQuery) window.jQuery(el).trigger('click');
+      } catch (e) {}
+    }, 150);
+  }
+
+  function stopWaiting(status, btn) {
+    writeStore(WAIT_KEY, false);
+    dlog('stopWaiting');
+    if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+    if (btn) btn.textContent = '开启自动等待';
+    if (status) status.textContent = '已停止自动等待。';
+  }
+
+  async function enterAndFill(status) {
+    for (let i = 0; i < 12; i += 1) {
+      if (i > 0) await sleep(250);
+      const fields = firstSurveyField();
+      if (fields && !stillClosed()) {
+        writeStore(WAIT_KEY, false);
+        writeStore(RELOAD_KEY, 0);
+        dlog('entered fields=' + (fields.id || fields.name || fields.type));
+        if (filledThisLoad) {
+          status.textContent = '已完成填写。';
+          return;
+        }
+        if (hasFixedConfig()) {
+          status.textContent = '已进入问卷，自动填写中…';
+          await fillAll(status);
+        } else {
+          status.textContent = '请先保存配置。';
+        }
+        return;
+      }
+      const btn = findStartNode();
+      if (btn) {
+        status.textContent = '等待开放，重试点击…' + (i + 1);
+        dlog('retry click#' + (i + 1));
+        clickStart(btn);
+      }
+    }
+    const count = Number(readStore(RELOAD_KEY, 0)) + 1;
+    if (count > MAX_AUTO_RELOAD) {
+      writeStore(WAIT_KEY, false);
+      dlog('giveup reload>' + MAX_AUTO_RELOAD);
+      status.textContent = '未能进入，请手动刷新。';
+      return;
+    }
+    writeStore(RELOAD_KEY, count);
+    dlog('reload#' + count + ' closed=' + stillClosed() + ' fields=' + !!firstSurveyField());
+    status.textContent = '自动刷新进入…';
+    location.reload();
+  }
+
+  function startWaiting(status, btn, target) {
+    writeStore(WAIT_KEY, true);
+    dlog('wait start target=' + new Date(target).toLocaleTimeString('zh-CN', { hour12: false }));
+    startAttempts = 0;
+    let zeroSince = 0;
+    if (btn) btn.textContent = '停止自动等待';
+    if (waitTimer) { clearInterval(waitTimer); clearTimeout(waitTimer); waitTimer = null; }
+    const clearTimer = () => {
+      if (waitTimer) { clearTimeout(waitTimer); clearInterval(waitTimer); waitTimer = null; }
+    };
+    const schedule = (ms) => {
+      clearTimer();
+      waitTimer = setTimeout(tick, ms);
+    };
+    const tick = () => {
+      try {
+        const openNow = !parseOpenTarget();
+        const live = liveCountdown();
+        const remain = live ? live.ms : (pageCountdownSeen ? 0 : target - Date.now());
+        const fieldsNow = firstSurveyField();
+        if (openNow && !live && fieldsNow && !filledThisLoad) {
+          clearTimer();
+          writeStore(WAIT_KEY, false);
+          writeStore(RELOAD_KEY, 0);
+          status.textContent = '问卷已开放，自动填写中…';
+          if (hasFixedConfig()) fillAll(status);
+          else status.textContent = '请先保存配置。';
+          return;
+        }
+        if (remain > 0) {
+          zeroSince = 0;
+          status.textContent = '页面倒计时 ' + (live ? live.label : fmtRemain(remain)) + '，到点自动进入。';
+          schedule(remain <= 1200 ? 10 : (remain <= 3000 ? 100 : 1000));
+          return;
+        }
+        if (!zeroSince) zeroSince = Date.now();
+        const startBtn = findStartNode();
+        if (startBtn) {
+          clearTimer();
+          status.textContent = '倒计时结束，点击开始…';
+          waitTimer = setTimeout(() => {
+            waitTimer = null;
+            const btnNow = findStartNode() || startBtn;
+            dlog('click#' + (btnNow.id || btnNow.tagName) + ':' + startTextOf(btnNow) + ' delay=' + (Date.now() - zeroSince));
+            clickStart(btnNow);
+            enterAndFill(status);
+          }, CLICK_DELAY_MS);
+          return;
+        }
+        startAttempts += 1;
+        if (Date.now() - zeroSince < 3000) {
+          status.textContent = '等待开始按钮…';
+          schedule(100);
+          return;
+        }
+        const count = Number(readStore(RELOAD_KEY, 0)) + 1;
+        if (count > MAX_AUTO_RELOAD) {
+          stopWaiting(status, btn);
+          status.textContent = '仍未开放，已停止。';
+          return;
+        }
+        writeStore(RELOAD_KEY, count);
+        dlog('tick reload#' + count);
+        status.textContent = '倒计时结束，自动刷新进入…';
+        clearTimer();
+        location.reload();
+      } catch (e) {
+        status.textContent = '等待出错：' + (e && e.message ? e.message : e);
+        schedule(500);
+      }
+    };
+    tick();
+  }
+
+  async function startFill(status, fixedBox) {
+    if (stillClosed()) {
+      status.textContent = '问卷未开放。';
+      return;
+    }
+    if (!hasFixedConfig()) {
+      status.textContent = '请先保存配置。';
+      fixedBox.style.display = 'block';
+      fixedBox.loadValues();
+      return;
+    }
+    await fillAll(status);
+  }
+
+  function buildFixedBox(status) {
+    const box = document.createElement('div');
+    box.style.cssText = 'margin-top:8px;border-top:1px solid #374151;padding-top:8px';
+
+    const tip = document.createElement('div');
+    tip.textContent = '留空不填·仅本机保存';
+    tip.style.cssText = 'color:#9ca3af;margin-bottom:6px';
+    box.appendChild(tip);
+
+    const delayRow = document.createElement('div');
+    delayRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px;color:#d1d5db';
+    const delayLabel = document.createElement('span');
+    delayLabel.textContent = '随机延时(ms)';
+    const delayMin = document.createElement('input');
+    delayMin.type = 'number';
+    delayMin.min = '0';
+    delayMin.style.cssText = 'width:64px;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
+    const delayMax = document.createElement('input');
+    delayMax.type = 'number';
+    delayMax.min = '0';
+    delayMax.style.cssText = 'width:64px;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
+    const range = delayRange();
+    delayMin.value = String(range.min);
+    delayMax.value = String(range.max);
+    const saveDelay = () => {
+      const min = Math.max(0, Number(delayMin.value) || 0);
+      const max = Math.max(min, Number(delayMax.value) || min);
+      writeStore(DELAY_KEY, { min, max });
+      status.textContent = '延时 ' + min + '–' + max + 'ms。';
+    };
+    delayMin.addEventListener('change', saveDelay);
+    delayMax.addEventListener('change', saveDelay);
+    delayRow.appendChild(delayLabel);
+    delayRow.appendChild(delayMin);
+    delayRow.appendChild(document.createTextNode('–'));
+    delayRow.appendChild(delayMax);
+    box.appendChild(delayRow);
+
+    const inputs = {};
+    FIXED_FIELDS.forEach(([key, label]) => {
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:4px';
+      const span = document.createElement('span');
+      span.textContent = label;
+      span.style.cssText = 'width:56px;color:#d1d5db';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = '留空不填';
+      input.style.cssText = 'flex:1;min-width:0;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
+      row.appendChild(span);
+      row.appendChild(input);
+      box.appendChild(row);
+      inputs[key] = input;
+    });
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:6px;margin-top:6px';
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = '保存固定答案';
+    save.style.cssText = 'border:0;border-radius:8px;padding:6px 10px;background:#059669;color:#fff;cursor:pointer';
+    save.addEventListener('click', () => {
+      const obj = {};
+      FIXED_FIELDS.forEach(([key]) => {
+        const value = inputs[key].value.trim();
+        if (value) obj[key] = value;
+      });
+      saveFixed(obj);
+      status.textContent = '已保存。';
+    });
+    btnRow.appendChild(save);
+    box.appendChild(btnRow);
+
+    const moreRow = document.createElement('div');
+    moreRow.style.cssText = 'display:flex;gap:6px;margin-top:6px';
+    const clearFill = document.createElement('button');
+    clearFill.type = 'button';
+    clearFill.textContent = '清空恢复';
+    clearFill.style.cssText = 'border:0;border-radius:8px;padding:6px 10px;background:#4b5563;color:#fff;cursor:pointer';
+    clearFill.addEventListener('click', () => clearAll(status));
+    const copyAnswer = document.createElement('button');
+    copyAnswer.type = 'button';
+    copyAnswer.textContent = '复制答案';
+    copyAnswer.style.cssText = 'border:0;border-radius:8px;padding:6px 10px;background:#4b5563;color:#fff;cursor:pointer';
+    copyAnswer.addEventListener('click', () => copyResult(status));
+    moreRow.appendChild(clearFill);
+    moreRow.appendChild(copyAnswer);
+    const copyLog = document.createElement('button');
+    copyLog.type = 'button';
+    copyLog.textContent = '复制诊断';
+    copyLog.style.cssText = 'border:0;border-radius:8px;padding:6px 10px;background:#4b5563;color:#fff;cursor:pointer';
+    copyLog.addEventListener('click', async () => {
+      const text = location.href + '\n' + (readStore(LOG_KEY, []) || []).join('\n');
+      try {
+        await navigator.clipboard.writeText(text);
+        status.textContent = '已复制诊断日志。';
+      } catch (e) {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.left = '-9999px';
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        area.remove();
+        status.textContent = '已复制诊断日志。';
+      }
+    });
+    moreRow.appendChild(copyLog);
+    box.appendChild(moreRow);
+
+    box.loadValues = () => {
+      const fixed = loadFixed();
+      FIXED_FIELDS.forEach(([key]) => { inputs[key].value = fixed[key] || ''; });
+      const r = delayRange();
+      delayMin.value = String(r.min);
+      delayMax.value = String(r.max);
+    };
+    return box;
+  }
+
+  function buildPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+    if (!document.getElementById('wjx-ff-style')) {
+      const style = document.createElement('style');
+      style.id = 'wjx-ff-style';
+      style.textContent = '#' + PANEL_ID + ' button{transition:transform .08s,filter .12s}'
+        + '#' + PANEL_ID + ' button:hover{filter:brightness(1.15)}'
+        + '#' + PANEL_ID + ' button:active{transform:scale(.94);filter:brightness(1.3)}'
+        + '#' + PANEL_ID + ' input[type="checkbox"]{accent-color:#2563eb;width:15px;height:15px;cursor:pointer}';
+      document.head.appendChild(style);
+    }
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.style.cssText = [
+      'position:fixed', 'right:16px', 'bottom:16px', 'z-index:2147483647',
+      'width:280px', 'padding:12px', 'border-radius:12px',
+      'background:#111827', 'color:#f9fafb', 'font:13px/1.5 system-ui,sans-serif',
+      'box-shadow:0 8px 24px rgba(0,0,0,.35)'
+    ].join(';');
+
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px';
+    const title = document.createElement('div');
+    title.textContent = '问卷星填充 v' + VERSION;
+    title.style.cssText = 'font-weight:700';
+    const minBtn = document.createElement('button');
+    minBtn.type = 'button';
+    minBtn.textContent = '—';
+    minBtn.title = '收起/展开';
+    minBtn.style.cssText = 'border:0;border-radius:6px;padding:2px 8px;background:#374151;color:#fff;cursor:pointer';
+    head.appendChild(title);
+    head.appendChild(minBtn);
+
+    const body = document.createElement('div');
+
+    const status = document.createElement('div');
+    status.id = 'wjx-ff-status';
+    status.textContent = '就绪';
+    status.style.cssText = 'color:#d1d5db;margin-bottom:8px;word-break:break-all;min-height:18px';
+
+    const row = document.createElement('div');
+    row.id = 'wjx-ff-mainrow';
+    row.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+
+    function button(label, onClick) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.style.cssText = 'border:0;border-radius:8px;padding:6px 10px;background:#2563eb;color:#fff;cursor:pointer';
+      btn.addEventListener('click', () => {
+        Promise.resolve(onClick(status)).catch(() => { status.textContent = '操作出错。'; });
+      });
+      row.appendChild(btn);
+      return btn;
+    }
+
+    const fixedBox = buildFixedBox(status);
+    fixedBox.style.display = 'none';
+
+    button('填写配置信息', async () => {
+      const show = fixedBox.style.display === 'none';
+      fixedBox.style.display = show ? 'block' : 'none';
+      if (show) fixedBox.loadValues();
+      status.textContent = show ? '配置已展开。' : '配置已收起。';
+    });
+    button('开始自动填写', () => startFill(status, fixedBox));
+
+    const optRow = document.createElement('label');
+    optRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;color:#d1d5db;cursor:pointer';
+    const opt = document.createElement('input');
+    opt.type = 'checkbox';
+    opt.id = 'wjx-ff-submit-opt';
+    opt.checked = allowSubmit();
+    opt.addEventListener('change', () => {
+      writeStore(ALLOW_SUBMIT_KEY, opt.checked);
+      status.textContent = opt.checked ? '将勾选同意并提交。' : '仅填写，不提交。';
+    });
+    const optText = document.createElement('span');
+    optText.textContent = '勾选同意并提交';
+    optRow.appendChild(opt);
+    optRow.appendChild(optText);
+
+    if (window.__wjxDemoFastFillDuplicate) {
+      const warn = document.createElement('div');
+      warn.textContent = '检测到旧版脚本残留：请在篡改猴中删除旧条目，仅保留 v' + VERSION + '。';
+      warn.style.cssText = 'color:#fca5a5;margin-bottom:6px';
+      body.appendChild(warn);
+      dlog('duplicate takeover count=' + window.__wjxDemoFastFillDuplicate);
+    }
+    body.appendChild(status);
+    body.appendChild(row);
+    body.appendChild(optRow);
+    body.appendChild(fixedBox);
+
+    minBtn.addEventListener('click', () => {
+      const hide = body.style.display !== 'none';
+      body.style.display = hide ? 'none' : 'block';
+      minBtn.textContent = hide ? '+' : '—';
+      panel.style.width = hide ? 'auto' : '280px';
+    });
+
+    panel.appendChild(head);
+    panel.appendChild(body);
+    document.body.appendChild(panel);
+
+    let waitBtn = null;
+    const ensureWaitBtn = () => {
+      if (!waitBtn) {
+        waitBtn = button('停止自动等待', async () => {
+          if (readStore(WAIT_KEY, false)) stopWaiting(status, waitBtn);
+          else startWaiting(status, waitBtn, parseOpenTarget() || Date.now());
+        });
+      }
+      return waitBtn;
+    };
+    const openTarget = parseOpenTarget();
+    dlog('boot url=' + location.pathname + ' closed=' + !!openTarget + ' wait=' + readStore(WAIT_KEY, false) + ' fields=' + !!firstSurveyField());
+    if (openTarget) {
+      startWaiting(status, ensureWaitBtn(), openTarget);
+    } else if (readStore(WAIT_KEY, false)) {
+      writeStore(WAIT_KEY, false);
+      writeStore(RELOAD_KEY, 0);
+      if (hasFixedConfig()) {
+        status.textContent = '自动填写中…';
+        setTimeout(() => { fillAll(status); }, 100);
+      } else {
+        status.textContent = '请先保存配置。';
+      }
+    }
+    const surveyFieldsNow = Array.from(document.querySelectorAll(
+      '#divQuestion input, #divQuestion textarea, #divQuestion select, form input, form textarea, form select'
+    )).some((el) => !inPanel(el));
+    if (!openTarget && !surveyFieldsNow) {
+      let watchTicks = 0;
+      watchIvRef = setInterval(() => {
+        watchTicks += 1;
+        const t = parseOpenTarget();
+        if (t && !waitTimer) {
+          clearInterval(watchIvRef);
+          watchIvRef = null;
+          startWaiting(status, ensureWaitBtn(), t);
+        } else if (waitTimer || watchTicks > 120) {
+          clearInterval(watchIvRef);
+          watchIvRef = null;
+        }
+      }, 1000);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', buildPanel, { once: true });
+  } else {
+    buildPanel();
+  }
+})();
