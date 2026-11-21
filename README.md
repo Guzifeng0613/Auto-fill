@@ -6,10 +6,14 @@
 
 ## 一键安装
 
-**安装页（推荐）**：https://guzifeng0613.github.io/Auto-fill/
-
 **直链安装**（已装篡改猴时点击即弹出安装确认）：
 https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.user.js
+
+**网页版安装页**：仓库内 `index.html`，可直接下载打开；若开启 GitHub Pages，则可通过
+https://guzifeng0613.github.io/Auto-fill/ 访问。
+
+> 开启 Pages 只需一次：仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。
+> 之后每次推送到 `main`，`.github/workflows/pages.yml` 会自动部署安装页。
 
 安装前请先装好 [Tampermonkey](https://www.tampermonkey.net/)。若装过旧版本，请在篡改猴管理面板中**删除所有旧的同名条目**，只保留一份，避免旧版抢先运行。
 
