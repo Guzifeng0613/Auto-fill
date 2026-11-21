@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         问卷星 Demo 快速填充
 // @namespace    https://local.demo/wjx-demo-fastfill
-// @version      0.25.0
+// @version      0.26.0
 // @description  仅用于自有或已授权的问卷星 demo 测试：按本机保存的固定配置填写，配置没有的字段留空、不随机；遇到无法对应的新字段时只勾选同意不提交；倒计时与页面同步，归零后 30ms 自动点击开始；逐字段随机延时；不绕过安全校验、验证码、登录或风控。
 // @homepageURL  https://github.com/Guzifeng0613/Auto-fill
 // @supportURL   https://github.com/Guzifeng0613/Auto-fill/issues
@@ -21,7 +21,7 @@
   'use strict';
 
   const PANEL_ID = 'wjx-demo-fastfill-panel';
-  const VERSION = '0.25.0';
+  const VERSION = '0.26.0';
   const CLICK_DELAY_MS = 30;
 
   function cmpVersion(a, b) {
@@ -826,7 +826,7 @@
         }
         if (remain > 0) {
           zeroSince = 0;
-          status.textContent = '页面倒计时 ' + (live ? live.label : fmtRemain(remain)) + '，到点自动进入。';
+          status.textContent = '倒计时 ' + (live ? live.label : fmtRemain(remain));
           schedule(remain <= 1200 ? 10 : (remain <= 3000 ? 100 : 1000));
           return;
         }
@@ -1013,51 +1013,90 @@
       style.textContent = '#' + PANEL_ID + ' button{transition:transform .08s,filter .12s}'
         + '#' + PANEL_ID + ' button:hover{filter:brightness(1.15)}'
         + '#' + PANEL_ID + ' button:active{transform:scale(.94);filter:brightness(1.3)}'
-        + '#' + PANEL_ID + ' input[type="checkbox"]{accent-color:#2563eb;width:15px;height:15px;cursor:pointer}';
+        + '#' + PANEL_ID + ' input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:13px;height:13px;margin:0;'
+        + 'border:1px solid #6b7280;border-radius:3px;background:#0f1728;cursor:pointer;position:relative;flex:0 0 auto}'
+        + '#' + PANEL_ID + ' input[type="checkbox"]:checked{background:#2563eb;border-color:#2563eb}'
+        + '#' + PANEL_ID + ' input[type="checkbox"]:checked::after{content:"";position:absolute;left:3px;top:0;width:4px;height:8px;'
+        + 'border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}';
       document.head.appendChild(style);
     }
     const panel = document.createElement('div');
     panel.id = PANEL_ID;
     panel.style.cssText = [
       'position:fixed', 'right:16px', 'bottom:16px', 'z-index:2147483647',
-      'width:280px', 'padding:12px', 'border-radius:12px',
+      'width:320px', 'padding:12px', 'border-radius:14px',
       'background:#111827', 'color:#f9fafb', 'font:13px/1.5 system-ui,sans-serif',
-      'box-shadow:0 8px 24px rgba(0,0,0,.35)'
+      'border:1px solid #1f2937', 'box-shadow:0 10px 28px rgba(0,0,0,.4)'
     ].join(';');
 
     const head = document.createElement('div');
-    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px';
-    const title = document.createElement('div');
-    title.textContent = '问卷星填充 v' + VERSION;
-    title.style.cssText = 'font-weight:700';
-    const minBtn = document.createElement('button');
-    minBtn.type = 'button';
-    minBtn.textContent = '—';
-    minBtn.title = '收起/展开';
-    minBtn.style.cssText = 'border:0;border-radius:6px;padding:2px 8px;background:#374151;color:#fff;cursor:pointer';
-    head.appendChild(title);
-    head.appendChild(minBtn);
+    head.style.cssText = 'display:flex;align-items:flex-start;gap:10px';
 
-    const body = document.createElement('div');
+    const title = document.createElement('div');
+    title.textContent = '问卷星填写';
+    title.style.cssText = 'flex:0 0 auto;padding:6px 12px;border-radius:10px;background:#1f2937;'
+      + 'border:1px solid #374151;font-weight:700;white-space:nowrap';
+
+    const headRight = document.createElement('div');
+    headRight.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;align-items:flex-end';
 
     const status = document.createElement('div');
     status.id = 'wjx-ff-status';
     status.textContent = '就绪';
-    status.style.cssText = 'color:#d1d5db;margin-bottom:8px;word-break:break-all;min-height:18px';
+    status.style.cssText = 'color:#d1d5db;font-size:11.5px;line-height:1.35;text-align:right;'
+      + 'word-break:break-all;min-height:16px';
+
+    const optRow = document.createElement('label');
+    optRow.style.cssText = 'display:flex;align-items:center;gap:6px;color:#9ca3af;font-size:11.5px;cursor:pointer';
+    const opt = document.createElement('input');
+    opt.type = 'checkbox';
+    opt.id = 'wjx-ff-submit-opt';
+    opt.checked = allowSubmit();
+    const optText = document.createElement('span');
+    const syncOptText = () => { optText.textContent = opt.checked ? '勾选同意并提交' : '仅填写不提交'; };
+    syncOptText();
+    opt.addEventListener('change', () => {
+      writeStore(ALLOW_SUBMIT_KEY, opt.checked);
+      syncOptText();
+      status.textContent = opt.checked ? '将勾选同意并提交。' : '仅填写，不提交。';
+    });
+    optRow.appendChild(opt);
+    optRow.appendChild(optText);
+
+    headRight.appendChild(status);
+    headRight.appendChild(optRow);
+
+    const minBtn = document.createElement('button');
+    minBtn.type = 'button';
+    minBtn.textContent = '—';
+    minBtn.title = '收起/展开';
+    minBtn.style.cssText = 'flex:0 0 auto;border:0;border-radius:6px;padding:2px 8px;background:#374151;color:#fff;cursor:pointer';
+
+    head.appendChild(title);
+    head.appendChild(headRight);
+    head.appendChild(minBtn);
+
+    const body = document.createElement('div');
+    body.id = 'wjx-ff-body';
+    body.style.cssText = 'margin-top:10px';
 
     const row = document.createElement('div');
     row.id = 'wjx-ff-mainrow';
-    row.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+    row.style.cssText = 'display:flex;gap:8px';
 
-    function button(label, onClick) {
+    function button(label, onClick, parent, variant) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.textContent = label;
-      btn.style.cssText = 'border:0;border-radius:8px;padding:6px 10px;background:#2563eb;color:#fff;cursor:pointer';
+      const base = variant === 'ghost'
+        ? 'border:1px solid #374151;border-radius:8px;padding:3px 8px;background:transparent;color:#9ca3af;font-size:11px;cursor:pointer'
+        : 'flex:1;border:0;border-radius:10px;padding:9px 10px;color:#fff;font-size:13px;cursor:pointer;background:'
+          + (variant === 'secondary' ? '#374151' : '#2563eb');
+      btn.style.cssText = base;
       btn.addEventListener('click', () => {
         Promise.resolve(onClick(status)).catch(() => { status.textContent = '操作出错。'; });
       });
-      row.appendChild(btn);
+      (parent || row).appendChild(btn);
       return btn;
     }
 
@@ -1069,41 +1108,36 @@
       fixedBox.style.display = show ? 'block' : 'none';
       if (show) fixedBox.loadValues();
       status.textContent = show ? '配置已展开。' : '配置已收起。';
-    });
-    button('开始自动填写', () => startFill(status, fixedBox));
+    }, row, 'secondary');
+    button('自动填写', () => startFill(status, fixedBox), row, 'primary');
 
-    const optRow = document.createElement('label');
-    optRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;color:#d1d5db;cursor:pointer';
-    const opt = document.createElement('input');
-    opt.type = 'checkbox';
-    opt.id = 'wjx-ff-submit-opt';
-    opt.checked = allowSubmit();
-    opt.addEventListener('change', () => {
-      writeStore(ALLOW_SUBMIT_KEY, opt.checked);
-      status.textContent = opt.checked ? '将勾选同意并提交。' : '仅填写，不提交。';
-    });
-    const optText = document.createElement('span');
-    optText.textContent = '勾选同意并提交';
-    optRow.appendChild(opt);
-    optRow.appendChild(optText);
+    const footRow = document.createElement('div');
+    footRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-top:6px;min-height:20px';
+    const version = document.createElement('span');
+    version.id = 'wjx-ff-version';
+    version.textContent = 'v' + VERSION;
+    version.style.cssText = 'color:#6b7280;font-size:11px';
+    const waitSlot = document.createElement('span');
+    waitSlot.id = 'wjx-ff-waitslot';
+    footRow.appendChild(version);
+    footRow.appendChild(waitSlot);
 
     if (window.__wjxDemoFastFillDuplicate) {
       const warn = document.createElement('div');
       warn.textContent = '检测到旧版脚本残留：请在篡改猴中删除旧条目，仅保留 v' + VERSION + '。';
-      warn.style.cssText = 'color:#fca5a5;margin-bottom:6px';
+      warn.style.cssText = 'color:#fca5a5;margin-bottom:8px;font-size:11.5px';
       body.appendChild(warn);
       dlog('duplicate takeover count=' + window.__wjxDemoFastFillDuplicate);
     }
-    body.appendChild(status);
     body.appendChild(row);
-    body.appendChild(optRow);
+    body.appendChild(footRow);
     body.appendChild(fixedBox);
 
     minBtn.addEventListener('click', () => {
       const hide = body.style.display !== 'none';
       body.style.display = hide ? 'none' : 'block';
       minBtn.textContent = hide ? '+' : '—';
-      panel.style.width = hide ? 'auto' : '280px';
+      panel.style.width = hide ? 'auto' : '320px';
     });
 
     panel.appendChild(head);
@@ -1116,7 +1150,7 @@
         waitBtn = button('停止自动等待', async () => {
           if (readStore(WAIT_KEY, false)) stopWaiting(status, waitBtn);
           else startWaiting(status, waitBtn, parseOpenTarget() || Date.now());
-        });
+        }, waitSlot, 'ghost');
       }
       return waitBtn;
     };
