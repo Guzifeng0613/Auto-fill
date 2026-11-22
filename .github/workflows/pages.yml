@@ -1,8 +1,8 @@
 name: Deploy install page
 
 on:
-  push:
-    branches: [main]
+  # 仅在仓库 Settings → Pages → Source 选「GitHub Actions」之后手动运行。
+  # 未开启 Pages 时自动跑会失败并发失败邮件，故不随 push 触发。
   workflow_dispatch:
 
 permissions:

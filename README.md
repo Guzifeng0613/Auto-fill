@@ -13,7 +13,13 @@ https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.
 https://guzifeng0613.github.io/Auto-fill/ 访问。
 
 > 开启 Pages 只需一次：仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。
-> 之后每次推送到 `main`，`.github/workflows/pages.yml` 会自动部署安装页。
+> 开启后到 **Actions → Deploy install page → Run workflow** 手动跑一次即可部署。
+> 该工作流**不随 push 自动触发**：未开启 Pages 时自动运行必然失败并发送失败邮件，因此改为仅手动触发。
+
+**手机安装**：安卓浏览器点直链后若停在篡改猴 `SCRIPT INSTALLATION` 中转页不跳转，
+改用粘贴安装——打开 `index.html` 点「复制脚本全部代码」，或打开纯文本镜像
+https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.txt
+全选复制，再到篡改猴 **管理面板 → ＋ 添加新脚本**，删掉模板后粘贴并保存。
 
 安装前请先装好 [Tampermonkey](https://www.tampermonkey.net/)。若装过旧版本，请在篡改猴管理面板中**删除所有旧的同名条目**，只保留一份，避免旧版抢先运行。
 
