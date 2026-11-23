@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         问卷星 Demo 快速填充
 // @namespace    https://local.demo/wjx-demo-fastfill
-// @version      0.27.0
-// @description  仅用于自有或已授权的问卷星 demo 测试：按本机保存的固定配置填写（含校区、本科生/研究生），支持自定义题目规则自动作答单选/多选/下拉/填空，未匹配题目可在面板现场勾选并记住；配置没有的字段留空、不随机；倒计时与页面同步，归零后 30ms 自动点击开始；逐字段随机延时；不绕过安全校验、验证码、登录或风控。
+// @version      0.28.0
+// @description  仅用于自有或已授权的问卷星 demo 测试：按本机保存的固定配置填写（含校区、本科生/研究生），支持自定义题目规则自动作答单选/多选/下拉/填空；配置没有的字段留空、不随机；倒计时与页面同步，归零后 30ms 自动点击开始；逐字段随机延时；不绕过安全校验、验证码、登录或风控。
 // @homepageURL  https://github.com/Guzifeng0613/Auto-fill
 // @supportURL   https://github.com/Guzifeng0613/Auto-fill/issues
 // @downloadURL  https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.user.js
@@ -21,7 +21,7 @@
   'use strict';
 
   const PANEL_ID = 'wjx-demo-fastfill-panel';
-  const VERSION = '0.27.0';
+  const VERSION = '0.28.0';
   const CLICK_DELAY_MS = 30;
 
   function cmpVersion(a, b) {
@@ -55,7 +55,6 @@
   const FIXED_KEY = 'wjxDemoFixedAnswers';
   const RULES_KEY = 'wjxDemoCustomRules';
   const FALLBACK_KEY = 'wjxDemoFallbackText';
-  const REMEMBER_KEY = 'wjxDemoRememberPicks';
   const MAX_AUTO_RELOAD = 8;
   const LOG_KEY = 'wjxDemoDebugLog';
 
@@ -355,10 +354,6 @@
     return clean(readStore(FALLBACK_KEY, '') || '');
   }
 
-  function rememberPicks() {
-    return readStore(REMEMBER_KEY, true) !== false;
-  }
-
   function normKey(s) {
     return clean(s).toLowerCase().replace(/[^一-龥a-z0-9]/g, '');
   }
@@ -380,17 +375,6 @@
     return String(value || '').split(/[|｜,，、;；\/]+/).map(clean).filter(Boolean);
   }
 
-  function questionTitle(el) {
-    const block = questionBlock(el);
-    const cand = block && block.querySelector
-      ? block.querySelector('.field-label, .topic, .div_title_question, .question-title, .q-title, legend')
-      : null;
-    let t = cand ? clean(cand.innerText) : '';
-    if (!t) t = clean((block && block.innerText) || hintFor(el));
-    t = t.replace(/^[*\s]*\d+\s*[.、．)）]\s*/, '').replace(/\s*[*＊]\s*$/, '');
-    return t.slice(0, 40) || clean(hintFor(el)).slice(0, 40);
-  }
-
   function wantFor(el, fixed) {
     const hint = hintFor(el);
     const key = fixedKeyFor(hint);
@@ -399,17 +383,6 @@
     const rule = ruleAnswerFor(hint);
     if (rule) return { value: rule, from: 'rule', key };
     return { value: '', from: '', key };
-  }
-
-  function rememberRule(title, answer) {
-    if (!rememberPicks()) return;
-    const q = clean(title);
-    const a = clean(answer);
-    if (!q || !a) return;
-    const rules = loadRules().filter((r) => normKey(r.q) !== normKey(q));
-    rules.push({ q, a });
-    saveRules(rules);
-    dlog('remember rule q=' + q.slice(0, 20) + ' a=' + a.slice(0, 20));
   }
 
   async function fillNativeChoices(root, fixed) {
@@ -672,11 +645,9 @@
     const texts = await fillTexts(root, fixed, status);
     const filled = choices.filled + custom.filled + selects.filled + texts.filled;
     const unmapped = choices.unmapped + custom.unmapped + selects.unmapped + texts.unmapped;
-    const pending = renderPicker(status);
-    dlog('fill done filled=' + filled + ' unmapped=' + unmapped + ' pending=' + pending);
+    dlog('fill done filled=' + filled + ' unmapped=' + unmapped);
     status.textContent = '完成：填写' + filled + ' 项'
-      + (unmapped ? '，未对应' + unmapped + ' 项' : '')
-      + (pending ? '，待选' + pending + ' 项' : '');
+      + (unmapped ? '，未对应' + unmapped + ' 项' : '');
     if (!allowSubmit()) return;
     if (!clickConsent()) {
       status.textContent = '未找到同意框。';
@@ -1000,237 +971,6 @@
     await fillAll(status);
   }
 
-  function scanUnanswered() {
-    const root = surveyRoot();
-    const items = [];
-    const usable = (el) => !inPanel(el) && isEnabled(el) && choiceVisible(el) && !isConsent(el);
-
-    groupBy(Array.from(root.querySelectorAll('input[type="radio"]')).filter(usable), groupKey)
-      .forEach((inputs) => {
-        if (inputs.some((el) => el.checked)) return;
-        items.push({
-          kind: 'radio',
-          title: questionTitle(inputs[0]),
-          options: inputs.map((el) => ({ label: optionLabel(el), el }))
-        });
-      });
-
-    groupBy(Array.from(root.querySelectorAll('input[type="checkbox"]')).filter(usable), groupKey)
-      .forEach((inputs) => {
-        if (inputs.some((el) => el.checked)) return;
-        items.push({
-          kind: 'checkbox',
-          title: questionTitle(inputs[0]),
-          options: inputs.map((el) => ({ label: optionLabel(el), el }))
-        });
-      });
-
-    const customSel = '[role="radio"], [role="checkbox"], .ui-radio, .ui-checkbox, .radio, .checkbox';
-    const customEls = Array.from(root.querySelectorAll(customSel)).filter((el) => {
-      if (inPanel(el) || !isVisible(el) || isConsent(el)) return false;
-      return !el.querySelector('input[type="radio"], input[type="checkbox"]');
-    });
-    groupBy(customEls, (el) => {
-      const role = el.getAttribute('role') || (/checkbox/.test(el.className) ? 'checkbox' : 'radio');
-      const block = questionBlock(el);
-      return role + '|' + (block.id || block.getAttribute('data-id') || clean(block.innerText).slice(0, 60));
-    }).forEach((els, key) => {
-      if (els.some((el) => el.getAttribute('aria-checked') === 'true')) return;
-      items.push({
-        kind: key.split('|')[0] === 'checkbox' ? 'custom-checkbox' : 'custom-radio',
-        title: questionTitle(els[0]),
-        options: els.map((el) => ({ label: clean(el.innerText) || '选项', el }))
-      });
-    });
-
-    Array.from(root.querySelectorAll('select')).forEach((select) => {
-      if (inPanel(select) || !isVisible(select) || !isEnabled(select)) return;
-      const options = Array.from(select.options).filter((opt) => !opt.disabled && opt.value !== '');
-      if (!options.length) return;
-      if (Array.from(select.selectedOptions).some((opt) => opt.value !== '')) return;
-      items.push({
-        kind: 'select',
-        title: questionTitle(select),
-        el: select,
-        options: options.map((opt) => ({ label: clean(opt.innerText || opt.textContent || opt.value), el: opt }))
-      });
-    });
-
-    const textSel = 'input[type="text"], input[type="tel"], input[type="email"], input[type="number"],'
-      + 'input[type="date"], input[type="datetime-local"], input[type="url"], input:not([type]), textarea';
-    Array.from(root.querySelectorAll(textSel)).forEach((el) => {
-      if (inPanel(el) || !isVisible(el) || !isEditableText(el) || clean(el.value)) return;
-      items.push({ kind: 'text', title: questionTitle(el), el });
-    });
-
-    return items;
-  }
-
-  function applyPick(item, option, status) {
-    const kind = item.kind;
-    if (kind === 'radio') {
-      setChecked(option.el, true);
-      rememberRule(item.title, option.label);
-    } else if (kind === 'checkbox') {
-      setChecked(option.el, !option.el.checked);
-      const picked = item.options.filter((o) => o.el.checked).map((o) => o.label);
-      if (picked.length) rememberRule(item.title, picked.join('|'));
-    } else if (kind === 'select') {
-      if (!touchedSelect.has(item.el)) touchedSelect.set(item.el, item.el.value);
-      if (item.el.multiple) {
-        option.el.selected = !option.el.selected;
-        fire(item.el, ['input', 'change']);
-        const picked = Array.from(item.el.selectedOptions).map((o) => clean(o.innerText || o.value)).filter(Boolean);
-        if (picked.length) rememberRule(item.title, picked.join('|'));
-      } else {
-        setNativeValue(item.el, option.el.value);
-        rememberRule(item.title, option.label);
-      }
-    } else if (kind === 'text') {
-      const value = clean(option && option.value);
-      if (!value) return false;
-      if (!touchedText.has(item.el)) touchedText.set(item.el, item.el.value);
-      setNativeValue(item.el, value);
-      rememberRule(item.title, value);
-    } else {
-      const el = option.el;
-      if (!touchedCustom.has(el)) touchedCustom.set(el, el.getAttribute('aria-checked'));
-      el.dataset.wjxFfCustom = '1';
-      try { el.click(); } catch (e) {}
-      const want = kind === 'custom-checkbox' ? el.getAttribute('aria-checked') !== 'true' : true;
-      if ((el.getAttribute('aria-checked') === 'true') !== want) {
-        el.setAttribute('aria-checked', want ? 'true' : 'false');
-        fire(el, ['input', 'change', 'click']);
-      }
-      const picked = item.options.filter((o) => o.el.getAttribute('aria-checked') === 'true').map((o) => o.label);
-      if (picked.length) rememberRule(item.title, picked.join('|'));
-    }
-    if (status) status.textContent = '已选：' + clean(option && (option.label || option.value)).slice(0, 24);
-    return true;
-  }
-
-  function renderPicker(status) {
-    const box = document.getElementById('wjx-ff-picker');
-    if (!box) return 0;
-    box.innerHTML = '';
-    const items = scanUnanswered();
-    if (!items.length) {
-      box.style.display = 'none';
-      if (allowSubmit() && filledThisLoad && !submittedThisLoad) {
-        box.style.display = 'block';
-        const done = document.createElement('div');
-        done.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;border-top:1px solid #374151;padding-top:8px';
-        const txt = document.createElement('span');
-        txt.textContent = '全部已填';
-        txt.style.cssText = 'color:#34d399;flex:1';
-        const sub = document.createElement('button');
-        sub.type = 'button';
-        sub.textContent = '勾选并提交';
-        sub.style.cssText = 'border:0;border-radius:8px;padding:5px 9px;background:#059669;color:#fff;cursor:pointer';
-        sub.addEventListener('click', () => {
-          if (!clickConsent()) { status.textContent = '未找到同意框。'; return; }
-          submitNow(status);
-          renderPicker(status);
-        });
-        done.appendChild(txt);
-        done.appendChild(sub);
-        box.appendChild(done);
-      }
-      return 0;
-    }
-    box.style.display = 'block';
-    box.style.cssText += ';margin-top:8px;border-top:1px solid #374151;padding-top:8px';
-
-    const head = document.createElement('div');
-    head.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px';
-    const title = document.createElement('span');
-    title.textContent = '待选题目 ' + items.length;
-    title.style.cssText = 'color:#fbbf24;flex:1';
-    const remLabel = document.createElement('label');
-    remLabel.style.cssText = 'display:flex;align-items:center;gap:4px;color:#9ca3af;cursor:pointer';
-    const rem = document.createElement('input');
-    rem.type = 'checkbox';
-    rem.checked = rememberPicks();
-    rem.addEventListener('change', () => writeStore(REMEMBER_KEY, rem.checked));
-    const remText = document.createElement('span');
-    remText.textContent = '记住';
-    remLabel.appendChild(rem);
-    remLabel.appendChild(remText);
-    head.appendChild(title);
-    head.appendChild(remLabel);
-    box.appendChild(head);
-
-    items.slice(0, 12).forEach((item) => {
-      const row = document.createElement('div');
-      row.style.cssText = 'margin-bottom:6px';
-      const t = document.createElement('div');
-      t.textContent = item.title.slice(0, 34);
-      t.style.cssText = 'color:#d1d5db;margin-bottom:3px;line-height:1.35';
-      row.appendChild(t);
-      if (item.kind === 'text') {
-        const line = document.createElement('div');
-        line.style.cssText = 'display:flex;gap:5px';
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = '填这题';
-        input.style.cssText = 'flex:1;min-width:0;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
-        const ok = document.createElement('button');
-        ok.type = 'button';
-        ok.textContent = '填入';
-        ok.style.cssText = 'border:0;border-radius:6px;padding:4px 9px;background:#2563eb;color:#fff;cursor:pointer';
-        const doFill = () => {
-          if (!applyPick(item, { value: input.value }, status)) return;
-          renderPicker(status);
-        };
-        ok.addEventListener('click', doFill);
-        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doFill(); });
-        line.appendChild(input);
-        line.appendChild(ok);
-        row.appendChild(line);
-      } else {
-        const wrap = document.createElement('div');
-        wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
-        item.options.slice(0, 12).forEach((opt) => {
-          const b = document.createElement('button');
-          b.type = 'button';
-          b.textContent = opt.label.slice(0, 14);
-          const isOn = () => (item.kind === 'checkbox' ? opt.el.checked
-            : item.kind === 'custom-checkbox' ? opt.el.getAttribute('aria-checked') === 'true'
-              : item.kind === 'select' && item.el.multiple ? opt.el.selected : false);
-          const paint = () => {
-            const on = isOn();
-            b.style.cssText = 'border:1px solid ' + (on ? '#2563eb' : '#374151') + ';border-radius:6px;padding:3px 7px;'
-              + 'background:' + (on ? '#2563eb' : '#1f2937') + ';color:#f9fafb;cursor:pointer;max-width:100%';
-          };
-          paint();
-          b.addEventListener('click', () => {
-            applyPick(item, opt, status);
-            const multi = item.kind === 'checkbox' || item.kind === 'custom-checkbox'
-              || (item.kind === 'select' && item.el.multiple);
-            if (multi) {
-              paint();
-              const left = scanUnanswered().length;
-              title.textContent = left ? '待选题目 ' + left : '待选题目 0';
-              if (!left) renderPicker(status);
-            } else {
-              renderPicker(status);
-            }
-          });
-          wrap.appendChild(b);
-        });
-        row.appendChild(wrap);
-      }
-      box.appendChild(row);
-    });
-
-    if (items.length > 12) {
-      const more = document.createElement('div');
-      more.textContent = '还有 ' + (items.length - 12) + ' 题，填完上面继续显示';
-      more.style.cssText = 'color:#9ca3af';
-      box.appendChild(more);
-    }
-    return items.length;
-  }
 
   function buildFixedBox(status) {
     const box = document.createElement('div');
@@ -1561,10 +1301,6 @@
     }
     body.appendChild(row);
     body.appendChild(footRow);
-    const picker = document.createElement('div');
-    picker.id = 'wjx-ff-picker';
-    picker.style.display = 'none';
-    body.appendChild(picker);
     body.appendChild(fixedBox);
 
     minBtn.addEventListener('click', () => {
