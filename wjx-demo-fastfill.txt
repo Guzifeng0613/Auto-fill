@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         问卷星 Demo 快速填充
 // @namespace    https://local.demo/wjx-demo-fastfill
-// @version      0.26.0
-// @description  仅用于自有或已授权的问卷星 demo 测试：按本机保存的固定配置填写，配置没有的字段留空、不随机；遇到无法对应的新字段时只勾选同意不提交；倒计时与页面同步，归零后 30ms 自动点击开始；逐字段随机延时；不绕过安全校验、验证码、登录或风控。
+// @version      0.27.0
+// @description  仅用于自有或已授权的问卷星 demo 测试：按本机保存的固定配置填写（含校区、本科生/研究生），支持自定义题目规则自动作答单选/多选/下拉/填空，未匹配题目可在面板现场勾选并记住；配置没有的字段留空、不随机；倒计时与页面同步，归零后 30ms 自动点击开始；逐字段随机延时；不绕过安全校验、验证码、登录或风控。
 // @homepageURL  https://github.com/Guzifeng0613/Auto-fill
 // @supportURL   https://github.com/Guzifeng0613/Auto-fill/issues
 // @downloadURL  https://raw.githubusercontent.com/Guzifeng0613/Auto-fill/main/wjx-demo-fastfill.user.js
@@ -21,7 +21,7 @@
   'use strict';
 
   const PANEL_ID = 'wjx-demo-fastfill-panel';
-  const VERSION = '0.26.0';
+  const VERSION = '0.27.0';
   const CLICK_DELAY_MS = 30;
 
   function cmpVersion(a, b) {
@@ -53,6 +53,9 @@
   const LAST_SUBMIT_KEY = 'wjxDemoLastSubmit';
   const DELAY_KEY = 'wjxDemoDelayRange';
   const FIXED_KEY = 'wjxDemoFixedAnswers';
+  const RULES_KEY = 'wjxDemoCustomRules';
+  const FALLBACK_KEY = 'wjxDemoFallbackText';
+  const REMEMBER_KEY = 'wjxDemoRememberPicks';
   const MAX_AUTO_RELOAD = 8;
   const LOG_KEY = 'wjxDemoDebugLog';
 
@@ -140,6 +143,8 @@
     ['name', '姓名'],
     ['gender', '性别'],
     ['phone', '手机号'],
+    ['campus', '校区'],
+    ['degree', '本研'],
     ['college', '学院'],
     ['major', '专业'],
     ['className', '班级'],
@@ -147,6 +152,11 @@
     ['dormRoom', '房间号'],
     ['idCard', '身份证号']
   ];
+
+  const FIELD_PLACEHOLDER = {
+    campus: '如 昌平校区',
+    degree: '本科生 或 研究生'
+  };
 
   function hasFixedConfig() {
     const fixed = loadFixed();
@@ -161,6 +171,9 @@
       || /学(生|工|籍|证)[a-z0-9]*号/.test(h)) return 'studentId';
     if (/姓名|名字|称呼|真实姓名|学生姓名|name|xm|xingming/.test(h)) return 'name';
     if (/性别|gender|sex|xb|xingbie/.test(h)) return 'gender';
+    if (!/班级|班号|专业|学院|宿舍|学号|满意|评价|建议|意见/.test(h)
+      && /本科生|研究生|学历|培养层次|学生类别|学生类型|在读层次|教育层次|degree|education/.test(h)) return 'degree';
+    if (!/满意|评价|建议|意见/.test(h) && /校区|campus|xiaoqu/.test(h)) return 'campus';
     if (/房间|room|fj|fangjian/.test(h)) return 'dormRoom';
     if (/宿舍|寝室|楼栋|公寓|dorm|ss|sushe/.test(h)) return 'dorm';
     if (/学院|院系|系别|分院|所在系|学校|college|faculty|school|department|xy|xueyuan/.test(h)) return 'college';
@@ -328,6 +341,77 @@
     return false;
   }
 
+  function loadRules() {
+    const list = readStore(RULES_KEY, []);
+    if (!Array.isArray(list)) return [];
+    return list.filter((r) => r && clean(r.q) && clean(r.a));
+  }
+
+  function saveRules(list) {
+    writeStore(RULES_KEY, list.filter((r) => r && clean(r.q) && clean(r.a)));
+  }
+
+  function fallbackText() {
+    return clean(readStore(FALLBACK_KEY, '') || '');
+  }
+
+  function rememberPicks() {
+    return readStore(REMEMBER_KEY, true) !== false;
+  }
+
+  function normKey(s) {
+    return clean(s).toLowerCase().replace(/[^一-龥a-z0-9]/g, '');
+  }
+
+  function ruleAnswerFor(hint) {
+    const h = normKey(hint);
+    if (!h) return '';
+    const rules = loadRules();
+    let best = '';
+    let bestLen = 0;
+    rules.forEach((r) => {
+      const q = normKey(r.q);
+      if (q && h.includes(q) && q.length > bestLen) { best = clean(r.a); bestLen = q.length; }
+    });
+    return best;
+  }
+
+  function splitWants(value) {
+    return String(value || '').split(/[|｜,，、;；\/]+/).map(clean).filter(Boolean);
+  }
+
+  function questionTitle(el) {
+    const block = questionBlock(el);
+    const cand = block && block.querySelector
+      ? block.querySelector('.field-label, .topic, .div_title_question, .question-title, .q-title, legend')
+      : null;
+    let t = cand ? clean(cand.innerText) : '';
+    if (!t) t = clean((block && block.innerText) || hintFor(el));
+    t = t.replace(/^[*\s]*\d+\s*[.、．)）]\s*/, '').replace(/\s*[*＊]\s*$/, '');
+    return t.slice(0, 40) || clean(hintFor(el)).slice(0, 40);
+  }
+
+  function wantFor(el, fixed) {
+    const hint = hintFor(el);
+    const key = fixedKeyFor(hint);
+    const own = key ? clean(fixed[key]) : '';
+    if (own) return { value: own, from: 'fixed', key };
+    const rule = ruleAnswerFor(hint);
+    if (rule) return { value: rule, from: 'rule', key };
+    return { value: '', from: '', key };
+  }
+
+  function rememberRule(title, answer) {
+    if (!rememberPicks()) return;
+    const q = clean(title);
+    const a = clean(answer);
+    if (!q || !a) return;
+    const rules = loadRules().filter((r) => normKey(r.q) !== normKey(q));
+    rules.push({ q, a });
+    saveRules(rules);
+    dlog('remember rule q=' + q.slice(0, 20) + ' a=' + a.slice(0, 20));
+  }
+
   async function fillNativeChoices(root, fixed) {
     let filled = 0;
     let unmapped = 0;
@@ -337,12 +421,12 @@
     for (const inputs of groupBy(radios, groupKey).values()) {
       const enabled = inputs.filter(isEnabled);
       if (!enabled.length) continue;
-      const key = fixedKeyFor(hintFor(enabled[0]));
-      const want = key ? fixed[key] : '';
-      if (!want) { if (!key) unmapped += 1; continue; }
+      if (enabled.some((el) => el.checked)) continue;
+      const res = wantFor(enabled[0], fixed);
+      if (!res.value) { if (!res.key) unmapped += 1; continue; }
       await humanDelay();
       enabled.forEach(snapshotOption);
-      const pick = enabled.find((input) => matchOption(optionLabel(input), want));
+      const pick = enabled.find((input) => splitWants(res.value).some((w) => matchOption(optionLabel(input), w)));
       if (!pick) { unmapped += 1; continue; }
       setChecked(pick, true);
       filled += 1;
@@ -353,7 +437,18 @@
     for (const inputs of groupBy(checkboxes, groupKey).values()) {
       const enabled = inputs.filter(isEnabled);
       if (!enabled.length) continue;
-      unmapped += 1;
+      if (enabled.some((el) => el.checked)) continue;
+      const res = wantFor(enabled[0], fixed);
+      if (!res.value) { unmapped += 1; continue; }
+      await humanDelay();
+      enabled.forEach(snapshotOption);
+      let hit = 0;
+      splitWants(res.value).forEach((w) => {
+        const pick = enabled.find((input) => matchOption(optionLabel(input), w));
+        if (pick && !pick.checked) { setChecked(pick, true); hit += 1; }
+      });
+      if (hit) filled += 1;
+      else unmapped += 1;
     }
 
     return { filled, unmapped };
@@ -379,20 +474,24 @@
       const role = key.split('|')[0];
       const enabled = items.filter((el) => el.getAttribute('aria-disabled') !== 'true');
       if (!enabled.length) continue;
-      if (role === 'checkbox') { unmapped += 1; continue; }
-      const fieldKey = fixedKeyFor(clean(questionBlock(enabled[0]).innerText));
-      const want = fieldKey ? fixed[fieldKey] : '';
-      if (!want) { if (!fieldKey) unmapped += 1; continue; }
+      if (enabled.some((el) => el.getAttribute('aria-checked') === 'true')) continue;
+      const res = wantFor(enabled[0], fixed);
+      if (!res.value) { if (role === 'checkbox' || !res.key) unmapped += 1; continue; }
       await humanDelay();
-      const pick = enabled.find((el) => matchOption(clean(el.innerText), want));
-      if (!pick) { unmapped += 1; continue; }
-      if (!touchedCustom.has(pick)) touchedCustom.set(pick, pick.getAttribute('aria-checked'));
-      pick.dataset.wjxFfCustom = '1';
-      try { pick.click(); } catch (e) {}
-      if (pick.getAttribute('aria-checked') !== 'true') {
-        pick.setAttribute('aria-checked', 'true');
-        fire(pick, ['input', 'change', 'click']);
-      }
+      const wants = splitWants(res.value);
+      const picks = role === 'checkbox'
+        ? enabled.filter((el) => wants.some((w) => matchOption(clean(el.innerText), w)))
+        : enabled.filter((el) => wants.some((w) => matchOption(clean(el.innerText), w))).slice(0, 1);
+      if (!picks.length) { unmapped += 1; continue; }
+      picks.forEach((pick) => {
+        if (!touchedCustom.has(pick)) touchedCustom.set(pick, pick.getAttribute('aria-checked'));
+        pick.dataset.wjxFfCustom = '1';
+        try { pick.click(); } catch (e) {}
+        if (pick.getAttribute('aria-checked') !== 'true') {
+          pick.setAttribute('aria-checked', 'true');
+          fire(pick, ['input', 'change', 'click']);
+        }
+      });
       filled += 1;
     }
 
@@ -403,14 +502,27 @@
     let filled = 0;
     let unmapped = 0;
     for (const select of root.querySelectorAll('select')) {
-      if (inPanel(select) || !isVisible(select) || !isEnabled(select) || select.multiple) continue;
+      if (inPanel(select) || !isVisible(select) || !isEnabled(select)) continue;
       const options = Array.from(select.options).filter((opt) => !opt.disabled && opt.value !== '');
       if (!options.length) continue;
-      const key = fixedKeyFor(hintFor(select));
-      const want = key ? fixed[key] : '';
-      if (!want) { if (!key) unmapped += 1; continue; }
+      if (Array.from(select.selectedOptions).some((opt) => opt.value !== '')) continue;
+      const res = wantFor(select, fixed);
+      if (!res.value) { if (!res.key) unmapped += 1; continue; }
       await humanDelay();
-      const chosen = options.find((opt) => matchOption(clean(opt.innerText || opt.textContent || opt.value), want));
+      const wants = splitWants(res.value);
+      if (select.multiple) {
+        let hit = 0;
+        options.forEach((opt) => {
+          const text = clean(opt.innerText || opt.textContent || opt.value);
+          if (wants.some((w) => matchOption(text, w))) { opt.selected = true; hit += 1; }
+        });
+        if (!hit) { unmapped += 1; continue; }
+        if (!touchedSelect.has(select)) touchedSelect.set(select, select.value);
+        fire(select, ['input', 'change']);
+        filled += 1;
+        continue;
+      }
+      const chosen = options.find((opt) => wants.some((w) => matchOption(clean(opt.innerText || opt.textContent || opt.value), w)));
       if (!chosen) { unmapped += 1; continue; }
       if (!touchedSelect.has(select)) touchedSelect.set(select, select.value);
       setNativeValue(select, chosen.value);
@@ -437,9 +549,11 @@
     for (const el of root.querySelectorAll(selector)) {
       if (inPanel(el) || !isVisible(el) || !isEditableText(el)) continue;
       if (/^__/.test(el.name || '') || el.autocomplete === 'off' && el.name === 'search') continue;
-      const key = fixedKeyFor(hintFor(el));
-      const want = key ? fixed[key] : '';
-      if (!want) { if (!key) unmapped += 1; continue; }
+      if (clean(el.value)) continue;
+      const res = wantFor(el, fixed);
+      let want = res.value;
+      if (!want) want = fallbackText();
+      if (!want) { if (!res.key) unmapped += 1; continue; }
       await humanDelay();
       let value = String(want);
       const maxLength = Number(el.getAttribute('maxlength') || 0);
@@ -558,8 +672,11 @@
     const texts = await fillTexts(root, fixed, status);
     const filled = choices.filled + custom.filled + selects.filled + texts.filled;
     const unmapped = choices.unmapped + custom.unmapped + selects.unmapped + texts.unmapped;
-    dlog('fill done filled=' + filled + ' unmapped=' + unmapped);
-    status.textContent = '完成：填写' + filled + ' 项' + (unmapped ? '，未对应' + unmapped + ' 项' : '');
+    const pending = renderPicker(status);
+    dlog('fill done filled=' + filled + ' unmapped=' + unmapped + ' pending=' + pending);
+    status.textContent = '完成：填写' + filled + ' 项'
+      + (unmapped ? '，未对应' + unmapped + ' 项' : '')
+      + (pending ? '，待选' + pending + ' 项' : '');
     if (!allowSubmit()) return;
     if (!clickConsent()) {
       status.textContent = '未找到同意框。';
@@ -883,6 +1000,238 @@
     await fillAll(status);
   }
 
+  function scanUnanswered() {
+    const root = surveyRoot();
+    const items = [];
+    const usable = (el) => !inPanel(el) && isEnabled(el) && choiceVisible(el) && !isConsent(el);
+
+    groupBy(Array.from(root.querySelectorAll('input[type="radio"]')).filter(usable), groupKey)
+      .forEach((inputs) => {
+        if (inputs.some((el) => el.checked)) return;
+        items.push({
+          kind: 'radio',
+          title: questionTitle(inputs[0]),
+          options: inputs.map((el) => ({ label: optionLabel(el), el }))
+        });
+      });
+
+    groupBy(Array.from(root.querySelectorAll('input[type="checkbox"]')).filter(usable), groupKey)
+      .forEach((inputs) => {
+        if (inputs.some((el) => el.checked)) return;
+        items.push({
+          kind: 'checkbox',
+          title: questionTitle(inputs[0]),
+          options: inputs.map((el) => ({ label: optionLabel(el), el }))
+        });
+      });
+
+    const customSel = '[role="radio"], [role="checkbox"], .ui-radio, .ui-checkbox, .radio, .checkbox';
+    const customEls = Array.from(root.querySelectorAll(customSel)).filter((el) => {
+      if (inPanel(el) || !isVisible(el) || isConsent(el)) return false;
+      return !el.querySelector('input[type="radio"], input[type="checkbox"]');
+    });
+    groupBy(customEls, (el) => {
+      const role = el.getAttribute('role') || (/checkbox/.test(el.className) ? 'checkbox' : 'radio');
+      const block = questionBlock(el);
+      return role + '|' + (block.id || block.getAttribute('data-id') || clean(block.innerText).slice(0, 60));
+    }).forEach((els, key) => {
+      if (els.some((el) => el.getAttribute('aria-checked') === 'true')) return;
+      items.push({
+        kind: key.split('|')[0] === 'checkbox' ? 'custom-checkbox' : 'custom-radio',
+        title: questionTitle(els[0]),
+        options: els.map((el) => ({ label: clean(el.innerText) || '选项', el }))
+      });
+    });
+
+    Array.from(root.querySelectorAll('select')).forEach((select) => {
+      if (inPanel(select) || !isVisible(select) || !isEnabled(select)) return;
+      const options = Array.from(select.options).filter((opt) => !opt.disabled && opt.value !== '');
+      if (!options.length) return;
+      if (Array.from(select.selectedOptions).some((opt) => opt.value !== '')) return;
+      items.push({
+        kind: 'select',
+        title: questionTitle(select),
+        el: select,
+        options: options.map((opt) => ({ label: clean(opt.innerText || opt.textContent || opt.value), el: opt }))
+      });
+    });
+
+    const textSel = 'input[type="text"], input[type="tel"], input[type="email"], input[type="number"],'
+      + 'input[type="date"], input[type="datetime-local"], input[type="url"], input:not([type]), textarea';
+    Array.from(root.querySelectorAll(textSel)).forEach((el) => {
+      if (inPanel(el) || !isVisible(el) || !isEditableText(el) || clean(el.value)) return;
+      items.push({ kind: 'text', title: questionTitle(el), el });
+    });
+
+    return items;
+  }
+
+  function applyPick(item, option, status) {
+    const kind = item.kind;
+    if (kind === 'radio') {
+      setChecked(option.el, true);
+      rememberRule(item.title, option.label);
+    } else if (kind === 'checkbox') {
+      setChecked(option.el, !option.el.checked);
+      const picked = item.options.filter((o) => o.el.checked).map((o) => o.label);
+      if (picked.length) rememberRule(item.title, picked.join('|'));
+    } else if (kind === 'select') {
+      if (!touchedSelect.has(item.el)) touchedSelect.set(item.el, item.el.value);
+      if (item.el.multiple) {
+        option.el.selected = !option.el.selected;
+        fire(item.el, ['input', 'change']);
+        const picked = Array.from(item.el.selectedOptions).map((o) => clean(o.innerText || o.value)).filter(Boolean);
+        if (picked.length) rememberRule(item.title, picked.join('|'));
+      } else {
+        setNativeValue(item.el, option.el.value);
+        rememberRule(item.title, option.label);
+      }
+    } else if (kind === 'text') {
+      const value = clean(option && option.value);
+      if (!value) return false;
+      if (!touchedText.has(item.el)) touchedText.set(item.el, item.el.value);
+      setNativeValue(item.el, value);
+      rememberRule(item.title, value);
+    } else {
+      const el = option.el;
+      if (!touchedCustom.has(el)) touchedCustom.set(el, el.getAttribute('aria-checked'));
+      el.dataset.wjxFfCustom = '1';
+      try { el.click(); } catch (e) {}
+      const want = kind === 'custom-checkbox' ? el.getAttribute('aria-checked') !== 'true' : true;
+      if ((el.getAttribute('aria-checked') === 'true') !== want) {
+        el.setAttribute('aria-checked', want ? 'true' : 'false');
+        fire(el, ['input', 'change', 'click']);
+      }
+      const picked = item.options.filter((o) => o.el.getAttribute('aria-checked') === 'true').map((o) => o.label);
+      if (picked.length) rememberRule(item.title, picked.join('|'));
+    }
+    if (status) status.textContent = '已选：' + clean(option && (option.label || option.value)).slice(0, 24);
+    return true;
+  }
+
+  function renderPicker(status) {
+    const box = document.getElementById('wjx-ff-picker');
+    if (!box) return 0;
+    box.innerHTML = '';
+    const items = scanUnanswered();
+    if (!items.length) {
+      box.style.display = 'none';
+      if (allowSubmit() && filledThisLoad && !submittedThisLoad) {
+        box.style.display = 'block';
+        const done = document.createElement('div');
+        done.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;border-top:1px solid #374151;padding-top:8px';
+        const txt = document.createElement('span');
+        txt.textContent = '全部已填';
+        txt.style.cssText = 'color:#34d399;flex:1';
+        const sub = document.createElement('button');
+        sub.type = 'button';
+        sub.textContent = '勾选并提交';
+        sub.style.cssText = 'border:0;border-radius:8px;padding:5px 9px;background:#059669;color:#fff;cursor:pointer';
+        sub.addEventListener('click', () => {
+          if (!clickConsent()) { status.textContent = '未找到同意框。'; return; }
+          submitNow(status);
+          renderPicker(status);
+        });
+        done.appendChild(txt);
+        done.appendChild(sub);
+        box.appendChild(done);
+      }
+      return 0;
+    }
+    box.style.display = 'block';
+    box.style.cssText += ';margin-top:8px;border-top:1px solid #374151;padding-top:8px';
+
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px';
+    const title = document.createElement('span');
+    title.textContent = '待选题目 ' + items.length;
+    title.style.cssText = 'color:#fbbf24;flex:1';
+    const remLabel = document.createElement('label');
+    remLabel.style.cssText = 'display:flex;align-items:center;gap:4px;color:#9ca3af;cursor:pointer';
+    const rem = document.createElement('input');
+    rem.type = 'checkbox';
+    rem.checked = rememberPicks();
+    rem.addEventListener('change', () => writeStore(REMEMBER_KEY, rem.checked));
+    const remText = document.createElement('span');
+    remText.textContent = '记住';
+    remLabel.appendChild(rem);
+    remLabel.appendChild(remText);
+    head.appendChild(title);
+    head.appendChild(remLabel);
+    box.appendChild(head);
+
+    items.slice(0, 12).forEach((item) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'margin-bottom:6px';
+      const t = document.createElement('div');
+      t.textContent = item.title.slice(0, 34);
+      t.style.cssText = 'color:#d1d5db;margin-bottom:3px;line-height:1.35';
+      row.appendChild(t);
+      if (item.kind === 'text') {
+        const line = document.createElement('div');
+        line.style.cssText = 'display:flex;gap:5px';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = '填这题';
+        input.style.cssText = 'flex:1;min-width:0;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
+        const ok = document.createElement('button');
+        ok.type = 'button';
+        ok.textContent = '填入';
+        ok.style.cssText = 'border:0;border-radius:6px;padding:4px 9px;background:#2563eb;color:#fff;cursor:pointer';
+        const doFill = () => {
+          if (!applyPick(item, { value: input.value }, status)) return;
+          renderPicker(status);
+        };
+        ok.addEventListener('click', doFill);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doFill(); });
+        line.appendChild(input);
+        line.appendChild(ok);
+        row.appendChild(line);
+      } else {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
+        item.options.slice(0, 12).forEach((opt) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = opt.label.slice(0, 14);
+          const isOn = () => (item.kind === 'checkbox' ? opt.el.checked
+            : item.kind === 'custom-checkbox' ? opt.el.getAttribute('aria-checked') === 'true'
+              : item.kind === 'select' && item.el.multiple ? opt.el.selected : false);
+          const paint = () => {
+            const on = isOn();
+            b.style.cssText = 'border:1px solid ' + (on ? '#2563eb' : '#374151') + ';border-radius:6px;padding:3px 7px;'
+              + 'background:' + (on ? '#2563eb' : '#1f2937') + ';color:#f9fafb;cursor:pointer;max-width:100%';
+          };
+          paint();
+          b.addEventListener('click', () => {
+            applyPick(item, opt, status);
+            const multi = item.kind === 'checkbox' || item.kind === 'custom-checkbox'
+              || (item.kind === 'select' && item.el.multiple);
+            if (multi) {
+              paint();
+              const left = scanUnanswered().length;
+              title.textContent = left ? '待选题目 ' + left : '待选题目 0';
+              if (!left) renderPicker(status);
+            } else {
+              renderPicker(status);
+            }
+          });
+          wrap.appendChild(b);
+        });
+        row.appendChild(wrap);
+      }
+      box.appendChild(row);
+    });
+
+    if (items.length > 12) {
+      const more = document.createElement('div');
+      more.textContent = '还有 ' + (items.length - 12) + ' 题，填完上面继续显示';
+      more.style.cssText = 'color:#9ca3af';
+      box.appendChild(more);
+    }
+    return items.length;
+  }
+
   function buildFixedBox(status) {
     const box = document.createElement('div');
     box.style.cssText = 'margin-top:8px;border-top:1px solid #374151;padding-top:8px';
@@ -930,13 +1279,88 @@
       span.style.cssText = 'width:56px;color:#d1d5db';
       const input = document.createElement('input');
       input.type = 'text';
-      input.placeholder = '留空不填';
+      input.placeholder = FIELD_PLACEHOLDER[key] || '留空不填';
       input.style.cssText = 'flex:1;min-width:0;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
       row.appendChild(span);
       row.appendChild(input);
       box.appendChild(row);
       inputs[key] = input;
     });
+
+    const fbRow = document.createElement('label');
+    fbRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px';
+    const fbSpan = document.createElement('span');
+    fbSpan.textContent = '填空兜底';
+    fbSpan.style.cssText = 'width:56px;color:#d1d5db';
+    const fbInput = document.createElement('input');
+    fbInput.type = 'text';
+    fbInput.placeholder = '留空=未匹配不填';
+    fbInput.style.cssText = 'flex:1;min-width:0;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
+    fbInput.value = fallbackText();
+    fbInput.addEventListener('change', () => writeStore(FALLBACK_KEY, clean(fbInput.value)));
+    fbRow.appendChild(fbSpan);
+    fbRow.appendChild(fbInput);
+    box.appendChild(fbRow);
+
+    const ruleHead = document.createElement('div');
+    ruleHead.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;border-top:1px solid #374151;padding-top:8px';
+    const ruleTitle = document.createElement('span');
+    ruleTitle.textContent = '自定义题目';
+    ruleTitle.style.cssText = 'color:#d1d5db;flex:1';
+    const ruleAdd = document.createElement('button');
+    ruleAdd.type = 'button';
+    ruleAdd.textContent = '＋ 加一题';
+    ruleAdd.style.cssText = 'border:1px solid #374151;border-radius:6px;padding:3px 8px;background:#1f2937;color:#f9fafb;cursor:pointer';
+    ruleHead.appendChild(ruleTitle);
+    ruleHead.appendChild(ruleAdd);
+    box.appendChild(ruleHead);
+
+    const ruleTip = document.createElement('div');
+    ruleTip.textContent = '题目关键词 → 答案；多选用 | 分隔';
+    ruleTip.style.cssText = 'color:#9ca3af;margin:4px 0 6px';
+    box.appendChild(ruleTip);
+
+    const ruleList = document.createElement('div');
+    box.appendChild(ruleList);
+    const ruleRows = [];
+
+    function addRuleRow(q, a) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:4px;margin-bottom:4px';
+      const qi = document.createElement('input');
+      qi.type = 'text';
+      qi.placeholder = '题目关键词';
+      qi.value = q || '';
+      qi.style.cssText = 'flex:1;min-width:0;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
+      const ai = document.createElement('input');
+      ai.type = 'text';
+      ai.placeholder = '答案/选项';
+      ai.value = a || '';
+      ai.style.cssText = 'flex:1;min-width:0;border:1px solid #374151;border-radius:6px;background:#1f2937;color:#f9fafb;padding:4px 6px';
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '×';
+      del.style.cssText = 'border:1px solid #374151;border-radius:6px;padding:2px 7px;background:#1f2937;color:#9ca3af;cursor:pointer';
+      const entry = { row, qi, ai };
+      del.addEventListener('click', () => {
+        row.remove();
+        const i = ruleRows.indexOf(entry);
+        if (i >= 0) ruleRows.splice(i, 1);
+        saveRules(currentRules());
+      });
+      row.appendChild(qi);
+      row.appendChild(ai);
+      row.appendChild(del);
+      ruleList.appendChild(row);
+      ruleRows.push(entry);
+    }
+
+    function currentRules() {
+      return ruleRows.map((r) => ({ q: clean(r.qi.value), a: clean(r.ai.value) })).filter((r) => r.q && r.a);
+    }
+
+    ruleAdd.addEventListener('click', () => addRuleRow('', ''));
+    loadRules().forEach((r) => addRuleRow(r.q, r.a));
 
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex;gap:6px;margin-top:6px';
@@ -952,6 +1376,8 @@
         if (value) obj[key] = value;
       });
       saveFixed(obj);
+      saveRules(currentRules());
+      writeStore(FALLBACK_KEY, clean(fbInput.value));
       status.textContent = '已保存。';
     });
     btnRow.appendChild(save);
@@ -1001,6 +1427,10 @@
       const r = delayRange();
       delayMin.value = String(r.min);
       delayMax.value = String(r.max);
+      fbInput.value = fallbackText();
+      ruleList.innerHTML = '';
+      ruleRows.length = 0;
+      loadRules().forEach((rule) => addRuleRow(rule.q, rule.a));
     };
     return box;
   }
@@ -1131,6 +1561,10 @@
     }
     body.appendChild(row);
     body.appendChild(footRow);
+    const picker = document.createElement('div');
+    picker.id = 'wjx-ff-picker';
+    picker.style.display = 'none';
+    body.appendChild(picker);
     body.appendChild(fixedBox);
 
     minBtn.addEventListener('click', () => {
